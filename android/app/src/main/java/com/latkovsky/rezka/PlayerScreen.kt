@@ -84,8 +84,14 @@ private const val PLAYER_UA =
         "Chrome/126.0.0.0 Mobile Safari/537.36"
 
 private fun formatPlayerTime(milliseconds: Long): String {
-    val totalMinutes = (milliseconds / 60_000).coerceAtLeast(0)
-    return "$totalMinutes мин"
+    val totalSeconds = (milliseconds / 1_000).coerceAtLeast(0)
+    val seconds = totalSeconds % 60
+    val totalMinutes = totalSeconds / 60
+    return if (totalMinutes >= 60) {
+        "%d:%02d:%02d".format(totalMinutes / 60, totalMinutes % 60, seconds)
+    } else {
+        "%02d:%02d".format(totalMinutes, seconds)
+    }
 }
 
 @Composable
@@ -584,6 +590,7 @@ fun PlayerScreen(
                 )
                 Text(formatPlayerTime(player.duration.coerceAtLeast(0L)), color = Color.White, style = MaterialTheme.typography.labelLarge)
             }
+
         }
 
         if (controlsLocked) {

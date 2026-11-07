@@ -2217,7 +2217,6 @@ public object FfiConverterSequenceTypeTranslator: FfiConverterRustBuffer<List<Tr
             FfiConverterTypeTranslator.read(buf)
         }
     }
-
     override fun allocationSize(value: List<Translator>): ULong {
         val sizeForLength = 4UL
         val sizeForItems = value.map { FfiConverterTypeTranslator.allocationSize(it) }.sum()

@@ -12,8 +12,8 @@ android {
         applicationId = "com.latkovsky.rezka"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.0.6"
+        versionCode = 9
+        versionName = "1.0.8"
     }
 
     buildTypes {

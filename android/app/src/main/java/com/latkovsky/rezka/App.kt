@@ -509,6 +509,32 @@ private fun matchingSearchCards(cards: List<Card>, query: String): List<Card> {
     }
 }
 
+private fun countryFlag(info: String): String? {
+    val value = info.lowercase()
+    val countries = listOf(
+        listOf("россия", "россий", "russia") to "🇷🇺",
+        listOf("сша", "америка", "united states", "usa") to "🇺🇸",
+        listOf("великобритания", "британия", "united kingdom", "britain") to "🇬🇧",
+        listOf("канада", "canada") to "🇨🇦",
+        listOf("франция", "france") to "🇫🇷",
+        listOf("германия", "germany") to "🇩🇪",
+        listOf("италия", "italy") to "🇮🇹",
+        listOf("испания", "spain") to "🇪🇸",
+        listOf("япония", "japan") to "🇯🇵",
+        listOf("южная корея", "корея", "south korea", "korea") to "🇰🇷",
+        listOf("китай", "china") to "🇨🇳",
+        listOf("тайвань", "taiwan") to "🇹🇼",
+        listOf("гонконг", "hong kong") to "🇭🇰",
+        listOf("таиланд", "тайланд", "thailand") to "🇹🇭",
+        listOf("индия", "india") to "🇮🇳",
+        listOf("турция", "turkey", "türkiye") to "🇹🇷",
+        listOf("австралия", "australia") to "🇦🇺",
+        listOf("бразилия", "brazil") to "🇧🇷",
+        listOf("мексика", "mexico") to "🇲🇽",
+    )
+    return countries.firstOrNull { (names, _) -> names.any(value::contains) }?.second
+}
+
 private fun Throwable.userMessage(): String = when (this) {
     is CoreException.Auth -> msg
     is CoreException.Network -> msg
@@ -615,7 +641,12 @@ fun App() {
         }
     }
 
-    fun setWatchStatus(detail: MovieDetail, status: WatchStatus) {
+    fun setWatchStatus(detail: MovieDetail, status: WatchStatus?) {
+        if (status == null) {
+            watchItems = watchItems.filterNot { it.path == detail.path }
+            saveWatchList(prefs, watchItems)
+            return
+        }
         val item = WatchListItem(
             path = detail.path,
             title = detail.title,
@@ -730,13 +761,15 @@ fun App() {
                         },
                         onWatchStatusChange = { path, status ->
                             val item = watchItems.firstOrNull { it.path == path }
-                            if (item != null) {
-                                watchItems = watchItems.map {
-                                    if (it.path == path) it.copy(status = status) else it
-                                }
-                                saveWatchList(prefs, watchItems)
-                            }
-                        },
+                                    if (status == null) {
+                                        watchItems = watchItems.filterNot { it.path == path }
+                                    } else if (item != null) {
+                                        watchItems = watchItems.map {
+                                            if (it.path == path) it.copy(status = status) else it
+                                        }
+                                    }
+                                    saveWatchList(prefs, watchItems)
+                                },
                         themeVariant = selectedTheme,
                         onThemeChange = { variant ->
                             selectedTheme = variant
@@ -1118,7 +1151,7 @@ private fun HomeScreen(
     watchItems: List<WatchListItem>,
     playerTheme: PlayerColorTheme,
     onPlayerThemeChange: (PlayerColorTheme) -> Unit,
-    onWatchStatusChange: (String, WatchStatus) -> Unit,
+    onWatchStatusChange: (String, WatchStatus?) -> Unit,
     themeVariant: FoxThemeVariant,
     onThemeChange: (FoxThemeVariant) -> Unit,
     cachedHome: List<Card>,
@@ -1442,26 +1475,37 @@ private fun HomeScreen(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
                 )
-                ScrollableTabRow(
-                    selectedTabIndex = category,
-                    containerColor = Color.Transparent,
-                    contentColor = Accent,
-                    edgePadding = 0.dp,
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    categoryTitles.forEachIndexed { index, title ->
-                        Tab(
-                            selected = category == index,
+                    items(categoryTitles.size) { index ->
+                        val title = categoryTitles[index]
+                        Surface(
                             onClick = {
                                 category = index
                                 catalogQuery = ""
                             },
-                            text = {
+                            color = if (category == index) Accent.copy(alpha = 0.18f) else SurfaceDark,
+                            shape = RoundedCornerShape(14.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                width = 1.dp,
+                                color = if (category == index) Accent else SurfaceHigher,
+                            ),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                Text(listOf("🎬", "📺", "🧸", "🎌", "🌸")[index])
                                 Text(
                                     title,
-                                    fontWeight = if (category == index) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontWeight = if (category == index) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (category == index) Accent else MaterialTheme.colorScheme.onSurface,
                                 )
-                            },
-                        )
+                            }
+                        }
                     }
                 }
 
@@ -2201,18 +2245,14 @@ private fun PosterCard(card: Card, onClick: () -> Unit) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
-            if (card.info.isNotBlank()) {
+            countryFlag(card.info)?.let { flag ->
                 Text(
-                    card.info.substringBefore(",").trim(),
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelSmall,
+                    flag,
+                    style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier
-                        .align(Alignment.TopStart)
+                        .align(Alignment.TopEnd)
                         .padding(6.dp)
-                        .background(
-                            Color.Black.copy(alpha = 0.55f),
-                            RoundedCornerShape(6.dp),
-                        )
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 )
             }
@@ -2245,7 +2285,7 @@ private fun DetailScreen(
     busy: Boolean,
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit,
-    onWatchStatusChange: (WatchStatus) -> Unit,
+    onWatchStatusChange: (WatchStatus?) -> Unit,
     onPlay: (String, String, String) -> Unit,
 ) {
     val availableTranslators = remember(detail.path) {
@@ -2374,7 +2414,9 @@ private fun DetailScreen(
                     WatchStatus.entries.forEach { status ->
                         FilterChip(
                             selected = watchStatus == status,
-                            onClick = { onWatchStatusChange(status) },
+                            onClick = {
+                                onWatchStatusChange(if (watchStatus == status) null else status)
+                            },
                             label = { Text(status.title) },
                         )
                     }

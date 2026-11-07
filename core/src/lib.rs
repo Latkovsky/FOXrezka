@@ -133,7 +133,9 @@ impl Client {
         if is_doramas {
             let first_source_page = page.saturating_sub(1).saturating_mul(5) + 1;
             let mut cards = Vec::new();
-            for source_page in first_source_page..first_source_page.saturating_add(5) {
+            let mut source_page = first_source_page;
+            let mut scanned_pages = 0;
+            while scanned_pages < 20 && cards.len() < 24 {
                 let url = if source_page == 1 {
                     format!("{}/series/", http::BASE)
                 } else {
@@ -144,6 +146,8 @@ impl Client {
                     break;
                 }
                 cards.extend(page_cards.into_iter().filter(catalog::is_dorama));
+                source_page += 1;
+                scanned_pages += 1;
             }
             return Ok(cards);
         }

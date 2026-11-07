@@ -32,23 +32,47 @@ pub fn parse_homepage_cards(html: &str) -> Vec<Card> {
 }
 
 pub fn is_dorama(card: &Card) -> bool {
-    if card.kind != "series" {
+    if !card.path.contains("/series/") {
         return false;
+    }
+    if card.kind == "doramas" {
+        return true;
     }
     let info = card.info.to_lowercase();
     [
         "корея",
         "япония",
         "китай",
+        "кнр",
+        "южная корея",
+        "юж. корея",
+        "яп.",
+        "кит.",
         "тайвань",
         "гонконг",
         "таиланд",
+        "тай.",
+        "вьетнам",
+        "филиппины",
+        "индонезия",
+        "сингапур",
+        "малайзия",
+        "индия",
+        "непал",
+        "пакистан",
         "south korea",
+        "republic of korea",
         "japan",
         "china",
+        "prc",
         "taiwan",
         "hong kong",
         "thailand",
+        "vietnam",
+        "philippines",
+        "indonesia",
+        "singapore",
+        "malaysia",
     ]
     .iter()
     .any(|country| info.contains(country))
@@ -74,7 +98,9 @@ fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
         let path_lower = path.to_ascii_lowercase();
         if let Some(cat) = item.select(&cat_sel).next() {
             let classes: Vec<&str> = cat.value().classes().collect();
-            if classes.contains(&"series") {
+            if classes.contains(&"dorama") || classes.contains(&"doramas") {
+                kind = "doramas".to_string();
+            } else if classes.contains(&"series") {
                 kind = "series".to_string();
             } else if classes.contains(&"cartoons") {
                 kind = "cartoons".to_string();
@@ -85,7 +111,9 @@ fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
             }
         }
         if path_lower.contains("/series/") {
-            kind = "series".to_string();
+            if kind != "doramas" {
+                kind = "series".to_string();
+            }
         } else if path_lower.contains("/cartoons/") {
             kind = "cartoons".to_string();
         } else if path_lower.contains("/animation/") {
@@ -187,12 +215,18 @@ mod tests {
                 <div class="b-content__inline_item-link"><a>Японский сериал</a></div>
                 <div class="misc">2025, Япония</div>
             </div>
+            <div class="b-content__inline_item" data-id="4" data-url="/series/dorama-tagged/">
+                <span class="cat series dorama"></span>
+                <div class="b-content__inline_item-link"><a>Сериал с меткой дорамы</a></div>
+                <div class="misc">2025, Драма</div>
+            </div>
         "#;
         let cards = parse_cards(html);
         let doramas: Vec<_> = cards.iter().filter(|card| is_dorama(card)).collect();
 
-        assert_eq!(doramas.len(), 2);
+        assert_eq!(doramas.len(), 3);
         assert_eq!(doramas[0].title, "Корейский сериал");
         assert_eq!(doramas[1].title, "Японский сериал");
+        assert_eq!(doramas[2].title, "Сериал с меткой дорамы");
     }
 }

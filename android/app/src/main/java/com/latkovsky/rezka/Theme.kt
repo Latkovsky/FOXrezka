@@ -62,27 +62,27 @@ private val GreenPalette = Palette(
 )
 
 private val DarkPalette = Palette(
-    accent = Color(0xFF62F514),
-    accentSecondary = Color(0xFFB6FF59),
-    background = Color(0xFF09090D),
-    surface = Color(0xFF17171F),
-    surfaceHigher = Color(0xFF242430),
-    textDim = Color(0xFFA5A5B5),
-    foreground = Color(0xFFF1F0F7),
-    foregroundMuted = Color(0xFFC8C6D3),
-    outline = Color(0xFF3A3946),
+    accent = Color(0xFFB39DDB),
+    accentSecondary = Color(0xFFD0BCFF),
+    background = Color(0xFF0D0B12),
+    surface = Color(0xFF191620),
+    surfaceHigher = Color(0xFF282332),
+    textDim = Color(0xFFB6AFC2),
+    foreground = Color(0xFFF4EFFA),
+    foregroundMuted = Color(0xFFD0C8DA),
+    outline = Color(0xFF443B50),
 )
 
 private val WhitePalette = Palette(
-    accent = Color(0xFF218A3A),
-    accentSecondary = Color(0xFF66A873),
-    background = Color(0xFFF5F6F4),
+    accent = Color(0xFF315EAA),
+    accentSecondary = Color(0xFF547FC1),
+    background = Color(0xFFF2F5FA),
     surface = Color(0xFFFFFFFF),
-    surfaceHigher = Color(0xFFE8ECE7),
-    textDim = Color(0xFF667067),
-    foreground = Color(0xFF171B18),
-    foregroundMuted = Color(0xFF4F5850),
-    outline = Color(0xFFD0D8D0),
+    surfaceHigher = Color(0xFFE5EBF5),
+    textDim = Color(0xFF626D7E),
+    foreground = Color(0xFF171D28),
+    foregroundMuted = Color(0xFF485466),
+    outline = Color(0xFFC8D2E1),
     light = true,
 )
 
