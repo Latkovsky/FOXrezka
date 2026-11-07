@@ -27,6 +27,11 @@ x86_64, соберёт `app-debug.apk` и, если телефон подклю�
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## Скачать приложение
+
+Готовый APK находится в разделе [Релизы](https://github.com/Latkovsky/rezka-client/releases/latest).
+Репозиторий приватный: скачать APK смогут только владелец и приглашённые участники.
+
 ## Что важно знать
 
 - **Логин** вводится один раз; куки сессии сохраняются в SharedPreferences и
