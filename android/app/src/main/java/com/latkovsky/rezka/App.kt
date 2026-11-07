@@ -542,6 +542,10 @@ fun App() {
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var availableUpdate by remember { mutableStateOf<ReleaseUpdate?>(null) }
+    var downloadedUpdateApk by remember { mutableStateOf<File?>(null) }
+    var updateActionRunning by remember { mutableStateOf(false) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         setFoxTheme(selectedTheme)
@@ -566,6 +570,17 @@ fun App() {
             prefs.edit().remove("cookies").remove(ENCRYPTED_COOKIES_KEY).apply()
         }
         booting = false
+    }
+
+    LaunchedEffect(Unit) {
+        val result = withContext(Dispatchers.IO) {
+            runCatching { fetchLatestUpdate(BuildConfig.VERSION_NAME) }
+        }
+        result.onSuccess { release ->
+            if (release != null) availableUpdate = release
+        }.onFailure {
+            updateMessage = "Не удалось автоматически проверить обновления: ${it.message}"
+        }
     }
 
     fun persistSession(profileEmail: String) {
@@ -862,6 +877,95 @@ fun App() {
                         text = { Text(message) },
                     )
                 }
+            }
+
+            availableUpdate?.let { release ->
+                AlertDialog(
+                    onDismissRequest = {
+                        availableUpdate = null
+                        updateMessage = null
+                    },
+                    title = { Text("Доступно обновление FOXrezka ${release.version}") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                if (downloadedUpdateApk == null) {
+                                    "Новая версия уже доступна. Скачать и установить её сейчас?"
+                                } else {
+                                    updateMessage ?: "Обновление скачано. Можно установить его."
+                                },
+                            )
+                            updateMessage?.let {
+                                Text(it, color = TextDim, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = !updateActionRunning,
+                            onClick = {
+                                scope.launch {
+                                    updateActionRunning = true
+                                    if (downloadedUpdateApk == null) {
+                                        val result = withContext(Dispatchers.IO) {
+                                            runCatching { downloadUpdate(context, release) }
+                                        }
+                                        result.onSuccess { apk ->
+                                            downloadedUpdateApk = apk
+                                            updateMessage = "Обновление скачано."
+                                        }.onFailure {
+                                            updateMessage = "Не удалось скачать обновление: ${it.message}"
+                                        }
+                                    }
+                                    val apk = downloadedUpdateApk
+                                    if (apk != null) {
+                                        if (context.packageManager.canRequestPackageInstalls()) {
+                                            runCatching { installUpdate(context, apk) }
+                                                .onSuccess {
+                                                    availableUpdate = null
+                                                    updateMessage = null
+                                                }
+                                                .onFailure {
+                                                    updateMessage = "Не удалось открыть установщик: ${it.message}"
+                                                }
+                                        } else {
+                                            updateMessage = "Разрешите установку из этого источника в настройках Android, затем нажмите «Установить»."
+                                            runCatching {
+                                                context.startActivity(
+                                                    Intent(
+                                                        AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                        Uri.parse("package:${context.packageName}"),
+                                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                                )
+                                            }.onFailure {
+                                                updateMessage = "Не удалось открыть настройки установки: ${it.message}"
+                                            }
+                                        }
+                                    }
+                                    updateActionRunning = false
+                                }
+                            },
+                        ) {
+                            Text(
+                                when {
+                                    updateActionRunning -> "Подождите…"
+                                    downloadedUpdateApk != null -> "Установить"
+                                    else -> "Скачать и установить"
+                                },
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                availableUpdate = null
+                                updateMessage = null
+                            },
+                        ) {
+                            Text("Позже")
+                        }
+                    },
+                )
             }
         }
     }

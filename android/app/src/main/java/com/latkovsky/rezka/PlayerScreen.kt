@@ -174,12 +174,14 @@ fun PlayerScreen(
                 prepare()
             }
     }
+    var isPlaying by remember { mutableStateOf(player.isPlaying) }
 
     var restored by remember { mutableStateOf(false) }
     DisposableEffect(player) {
         var completionReported = false
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
+                isPlaying = player.isPlaying
                 if (playbackState == Player.STATE_READY && !restored) {
                     if (startPositionMs > 0 && startPositionMs < player.duration) {
                         player.seekTo(startPositionMs)
@@ -194,6 +196,10 @@ fun PlayerScreen(
             override fun onPlayerError(playbackError: PlaybackException) {
                 error = playbackError.errorCodeName + ": " +
                     (playbackError.cause?.message ?: playbackError.message)
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
             }
         }
         player.addListener(listener)
@@ -224,8 +230,8 @@ fun PlayerScreen(
             seekFeedback = null
         }
     }
-    LaunchedEffect(showControls, player.isPlaying) {
-        if (showControls && player.isPlaying) {
+    LaunchedEffect(showControls, isPlaying) {
+        if (showControls && isPlaying) {
             delay(3_500)
             showControls = false
         }
@@ -440,21 +446,6 @@ fun PlayerScreen(
                     }
                 }
                 if (episodes.isNotEmpty()) {
-                    IconButton(
-                        enabled = currentEpisodeIndex > 0,
-                        onClick = {
-                            if (currentEpisodeIndex > 0) {
-                                player.pause()
-                                onSelectEpisode(episodes[currentEpisodeIndex - 1].episodeId)
-                            }
-                        },
-                    ) {
-                        Icon(
-                            Icons.Default.SkipPrevious,
-                            contentDescription = "Предыдущая серия",
-                            tint = if (currentEpisodeIndex > 0) playerAccent else Color.White.copy(alpha = 0.35f),
-                        )
-                    }
                     Box {
                         TextButton(onClick = { activeMenu = PlayerMenu.EPISODE }) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -492,25 +483,6 @@ fun PlayerScreen(
                             }
                         }
                     }
-                    IconButton(
-                        enabled = currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex,
-                        onClick = {
-                            if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
-                                player.pause()
-                                onSelectEpisode(episodes[currentEpisodeIndex + 1].episodeId)
-                            }
-                        },
-                    ) {
-                        Icon(
-                            Icons.Default.SkipNext,
-                            contentDescription = "Следующая серия",
-                            tint = if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
-                                playerAccent
-                            } else {
-                                Color.White.copy(alpha = 0.35f)
-                            },
-                        )
-                    }
                 }
                 IconButton(onClick = { controlsLocked = true; showControls = false }) {
                     Icon(Icons.Default.LockOpen, contentDescription = "Заблокировать управление", tint = playerAccent)
@@ -525,6 +497,20 @@ fun PlayerScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(28.dp),
             ) {
+                if (episodes.isNotEmpty()) {
+                    PlayerFastIconButton(
+                        icon = Icons.Default.SkipPrevious,
+                        contentDescription = "Предыдущая серия",
+                        tint = if (currentEpisodeIndex > 0) playerAccent else Color.White.copy(alpha = 0.35f),
+                        modifier = Modifier.size(48.dp),
+                        onClick = {
+                            if (currentEpisodeIndex > 0) {
+                                player.pause()
+                                onSelectEpisode(episodes[currentEpisodeIndex - 1].episodeId)
+                            }
+                        },
+                    )
+                }
                 PlayerFastIconButton(
                     icon = Icons.Default.Replay10,
                     contentDescription = "Назад на 10 секунд",
@@ -536,11 +522,11 @@ fun PlayerScreen(
                     },
                 )
                 PlayerFastIconButton(
-                    icon = if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (player.isPlaying) "Пауза" else "Продолжить",
+                    icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Пауза" else "Продолжить",
                     tint = playerAccent,
                     modifier = Modifier.size(72.dp),
-                    onClick = { if (player.isPlaying) player.pause() else player.play() },
+                    onClick = { if (isPlaying) player.pause() else player.play() },
                 )
                 PlayerFastIconButton(
                     icon = Icons.Default.Forward10,
@@ -553,6 +539,24 @@ fun PlayerScreen(
                         seekFeedback = "+10 сек"
                     },
                 )
+                if (episodes.isNotEmpty()) {
+                    PlayerFastIconButton(
+                        icon = Icons.Default.SkipNext,
+                        contentDescription = "Следующая серия",
+                        tint = if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
+                            playerAccent
+                        } else {
+                            Color.White.copy(alpha = 0.35f)
+                        },
+                        modifier = Modifier.size(48.dp),
+                        onClick = {
+                            if (currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.lastIndex) {
+                                player.pause()
+                                onSelectEpisode(episodes[currentEpisodeIndex + 1].episodeId)
+                            }
+                        },
+                    )
+                }
             }
 
             Row(
