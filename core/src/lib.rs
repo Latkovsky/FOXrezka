@@ -121,7 +121,7 @@ impl Client {
         };
         let html = self.http.get_html(&url)?;
         guard_login(&html)?;
-        Ok(catalog::parse_homepage_series(&html))
+        Ok(catalog::parse_homepage_cards(&html))
     }
 
     pub fn category(&self, kind: String) -> Result<Vec<Card>, CoreError> {
@@ -130,8 +130,12 @@ impl Client {
 
     pub fn category_page(&self, kind: String, page: u32) -> Result<Vec<Card>, CoreError> {
         let section = match kind.as_str() {
-            "films" | "series" | "cartoons" => kind,
-            _ => "films".to_string(),
+            "films" => "films",
+            "series" => "series",
+            "cartoons" => "cartoons",
+            "anime" => "animation",
+            "doramas" => "dramy",
+            _ => "films",
         };
         let url = if page <= 1 {
             format!("{}/{section}/", http::BASE)

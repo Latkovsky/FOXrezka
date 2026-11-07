@@ -45,6 +45,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
@@ -63,6 +64,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -71,7 +73,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,7 +81,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -121,6 +122,7 @@ object Core {
 private const val PREFS = "rezka"
 private const val RECENT_KEY = "recently_watched"
 private const val HOME_CACHE_KEY = "homepage_series"
+private const val SEARCH_QUERY_KEY = "home_search_query"
 
 private sealed interface Screen {
     data object Home : Screen
@@ -159,7 +161,6 @@ private data class FavoriteItem(
 )
 
 private const val FAVORITES_KEY = "favorites"
-private const val TOTAL_WATCHED_MS_KEY = "total_watched_ms"
 private const val COMPLETED_SERIES_KEY = "completed_series_episodes"
 private const val THEME_KEY = "appearance_theme"
 private const val ENCRYPTED_COOKIES_KEY = "cookies_encrypted"
@@ -341,11 +342,12 @@ private fun saveCachedHomepage(
 private fun resumeKey(path: String, translator: String, season: String, episode: String) =
     "pos:$path|$translator|$season|$episode"
 
-private fun formatWatchTime(milliseconds: Long): String {
-    val minutes = (milliseconds / 60_000L).coerceAtLeast(0L)
-    val hours = minutes / 60
-    val remainingMinutes = minutes % 60
-    return if (hours > 0) "$hours ч $remainingMinutes мин" else "$minutes мин"
+private fun matchingSearchCards(cards: List<Card>, query: String): List<Card> {
+    val normalizedQuery = query.lowercase().filter { it.isLetterOrDigit() }
+    if (normalizedQuery.isBlank()) return cards
+    return cards.filter { card ->
+        card.title.lowercase().filter { it.isLetterOrDigit() }.contains(normalizedQuery)
+    }
 }
 
 private fun Throwable.userMessage(): String = when (this) {
@@ -367,7 +369,6 @@ fun App() {
     var recent by remember { mutableStateOf(loadRecent(prefs)) }
     var favorites by remember { mutableStateOf(loadFavorites(prefs)) }
     var cachedHome by remember { mutableStateOf(loadCachedHomepage(prefs)) }
-    var totalWatchedMs by remember { mutableLongStateOf(prefs.getLong(TOTAL_WATCHED_MS_KEY, 0L)) }
     var completedSeriesEpisodes by remember {
         mutableStateOf(prefs.getStringSet(COMPLETED_SERIES_KEY, emptySet()).orEmpty().toSet())
     }
@@ -528,8 +529,6 @@ fun App() {
                         email = email,
                         recent = recent,
                         favorites = favorites,
-                        totalWatchedMs = totalWatchedMs,
-                        completedSeriesCount = completedSeriesEpisodes.size,
                         themeVariant = selectedTheme,
                         onThemeChange = { variant ->
                             selectedTheme = variant
@@ -611,10 +610,6 @@ fun App() {
                                         args.seasonId,
                                         episodeId,
                                     )
-                                },
-                                onWatchTimeDelta = { deltaMs ->
-                                    totalWatchedMs += deltaMs
-                                    prefs.edit().putLong(TOTAL_WATCHED_MS_KEY, totalWatchedMs).apply()
                                 },
                                 onEpisodeCompleted = {
                                     if (args.detail.isSeries) {
@@ -820,8 +815,6 @@ private fun HomeScreen(
     email: String,
     recent: List<WatchedItem>,
     favorites: List<FavoriteItem>,
-    totalWatchedMs: Long,
-    completedSeriesCount: Int,
     themeVariant: FoxThemeVariant,
     onThemeChange: (FoxThemeVariant) -> Unit,
     cachedHome: List<Card>,
@@ -834,7 +827,10 @@ private fun HomeScreen(
     onOpen: (String) -> Unit,
 ) {
     var category by rememberSaveable { mutableIntStateOf(0) }
-    var query by rememberSaveable { mutableStateOf("") }
+    var query by rememberSaveable {
+        mutableStateOf(prefs.getString(SEARCH_QUERY_KEY, "").orEmpty())
+    }
+    var showRecentHistory by rememberSaveable { mutableStateOf(false) }
     var homeCards by remember { mutableStateOf(cachedHome) }
     var catalogCards by remember { mutableStateOf<List<Card>>(emptyList()) }
     var homeLoading by remember { mutableStateOf(cachedHome.isEmpty()) }
@@ -856,12 +852,24 @@ private fun HomeScreen(
     val homeGridState = rememberLazyGridState()
     val catalogGridState = rememberLazyGridState()
 
-    val kinds = listOf("films", "series", "cartoons")
-    val categoryTitles = listOf("Фильмы", "Сериалы", "Мультики")
+    val kinds = listOf("films", "series", "cartoons", "anime", "doramas")
+    val categoryTitles = listOf("Фильмы", "Сериалы", "Мультфильмы", "Аниме", "Дорамы")
     val destinationTitles = listOf("Главная", "Каталог", "Профиль", "Настройки")
 
+    LaunchedEffect(selectedDestination) {
+        if (selectedDestination != 2) showRecentHistory = false
+    }
+
+    BackHandler(enabled = selectedDestination == 2 && showRecentHistory) {
+        showRecentHistory = false
+    }
+
+    LaunchedEffect(query) {
+        prefs.edit().putString(SEARCH_QUERY_KEY, query).apply()
+    }
+
     LaunchedEffect(homeRefresh) {
-        homeLoading = true
+        homeLoading = homeCards.isEmpty()
         homeHasMore = false
         homeError = null
         val result = withContext(Dispatchers.IO) {
@@ -878,7 +886,6 @@ private fun HomeScreen(
             }
             .onFailure {
                 homeError = it.userMessage()
-                homeCards = emptyList()
             }
         homeLoading = false
     }
@@ -891,8 +898,11 @@ private fun HomeScreen(
         homeMoreError,
         homePage,
         homeRetry,
+        query,
     ) {
-        if (selectedDestination != 0 || !homeHasMore || homeLoading || homeLoadingMore || homeMoreError) {
+        if (selectedDestination != 0 || query.isNotBlank() || !homeHasMore ||
+            homeLoading || homeLoadingMore || homeMoreError
+        ) {
             return@LaunchedEffect
         }
         snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
@@ -922,7 +932,9 @@ private fun HomeScreen(
     }
 
     LaunchedEffect(selectedDestination, category, query, catalogRefresh) {
-        if (selectedDestination != 1) return@LaunchedEffect
+        if (selectedDestination != 1 && !(selectedDestination == 0 && query.isNotBlank())) {
+            return@LaunchedEffect
+        }
         if (query.isNotBlank()) delay(500)
         catalogLoading = true
         catalogHasMore = false
@@ -936,9 +948,9 @@ private fun HomeScreen(
             }
         }
         result
-            .onSuccess {
-                catalogCards = it
-                catalogHasMore = it.isNotEmpty()
+            .onSuccess { page ->
+                catalogCards = matchingSearchCards(page, query)
+                catalogHasMore = page.isNotEmpty()
             }
             .onFailure {
                 catalogError = it.userMessage()
@@ -958,12 +970,14 @@ private fun HomeScreen(
         catalogPage,
         catalogRetry,
     ) {
-        if (selectedDestination != 1 || catalogLoading || catalogLoadingMore ||
+        if ((selectedDestination != 1 && !(selectedDestination == 0 && query.isNotBlank())) ||
+            catalogLoading || catalogLoadingMore ||
             !catalogHasMore || catalogMoreError || catalogCards.isEmpty()
         ) {
             return@LaunchedEffect
         }
-        snapshotFlow { catalogGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+        val searchGridState = if (selectedDestination == 0) homeGridState else catalogGridState
+        snapshotFlow { searchGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .distinctUntilChanged()
             .collectLatest { lastVisible ->
                 if (lastVisible >= catalogCards.size - 5) {
@@ -976,9 +990,10 @@ private fun HomeScreen(
                         }
                     }
                     result
-                        .onSuccess { next ->
+                        .onSuccess { rawNext ->
+                            val next = matchingSearchCards(rawNext, query)
                             val merged = (catalogCards + next).distinctBy { it.path }
-                            catalogHasMore = next.isNotEmpty() && merged.size > catalogCards.size
+                            catalogHasMore = rawNext.isNotEmpty() && merged.size > catalogCards.size
                             if (merged.size > catalogCards.size) {
                                 catalogCards = merged
                                 catalogPage = page + 1
@@ -1007,21 +1022,44 @@ private fun HomeScreen(
             Text(destinationTitles[selectedDestination], color = TextDim, style = MaterialTheme.typography.labelLarge)
         }
 
+        if (selectedDestination == 0) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text("Поиск фильмов и сериалов") },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Default.Close, contentDescription = "Очистить")
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+            )
+        }
+
         when (selectedDestination) {
             0 -> {
                 Text(
-                    "Сериалы, которые сейчас смотрят",
+                    if (query.isBlank()) "Подборка с Rezka" else "Результаты поиска",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
                 )
-                Text(
-                    "Подборка с главной страницы Rezka",
-                    color = TextDim,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
-                )
-                if (recent.isNotEmpty()) {
+                if (query.isBlank()) {
+                    Text(
+                        "Актуальная подборка с главной страницы сайта",
+                        color = TextDim,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
+                    )
+                }
+                if (query.isBlank() && recent.isNotEmpty()) {
                     Text(
                         "Продолжить просмотр",
                         style = MaterialTheme.typography.titleMedium,
@@ -1088,7 +1126,7 @@ private fun HomeScreen(
                         }
                     }
                 }
-                if (homeError != null && homeCards.isNotEmpty()) {
+                if (query.isBlank() && homeError != null && homeCards.isNotEmpty()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 18.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1104,12 +1142,43 @@ private fun HomeScreen(
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
-                        homeLoading -> CircularProgressIndicator(
+                        query.isNotBlank() && catalogLoading -> CircularProgressIndicator(
                             color = Accent,
                             modifier = Modifier.align(Alignment.Center),
                         )
 
-                        homeError != null -> Column(
+                        query.isNotBlank() && catalogError != null -> Column(
+                            Modifier.align(Alignment.Center).padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(catalogError.orEmpty(), color = TextDim)
+                            TextButton(onClick = { catalogRefresh++ }) { Text("Повторить") }
+                        }
+
+                        query.isNotBlank() && catalogCards.isEmpty() -> Text(
+                            if (catalogLoading) "Загрузка…" else "Ничего не найдено",
+                            color = TextDim,
+                            modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                        )
+
+                        query.isNotBlank() -> LazyVerticalGrid(
+                            state = homeGridState,
+                            columns = GridCells.Adaptive(minSize = 108.dp),
+                            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            items(catalogCards, key = { it.path }) { card ->
+                                PosterCard(card = card, onClick = { onOpen(card.path) })
+                            }
+                        }
+
+                        homeLoading && homeCards.isEmpty() -> CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+
+                        homeError != null && homeCards.isEmpty() -> Column(
                             Modifier.align(Alignment.Center).padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
@@ -1118,7 +1187,7 @@ private fun HomeScreen(
                         }
 
                         homeCards.isEmpty() -> Text(
-                            "На главной Rezka пока нет сериалов для показа",
+                            "На главной Rezka пока нет подборки для показа",
                             color = TextDim,
                             modifier = Modifier.align(Alignment.Center).padding(24.dp),
                         )
@@ -1135,17 +1204,33 @@ private fun HomeScreen(
                             }
                         }
                     }
-                    if (homeLoadingMore) {
+                    if (query.isBlank() && homeLoadingMore) {
                         CircularProgressIndicator(
                             color = Accent,
                             modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
                             strokeWidth = 3.dp,
                         )
-                    } else if (homeMoreError) {
+                    } else if (query.isBlank() && homeMoreError) {
                         TextButton(
                             onClick = {
                                 homeMoreError = false
                                 homeRetry++
+                            },
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        ) {
+                            Text("Не удалось загрузить. Повторить")
+                        }
+                    } else if (query.isNotBlank() && catalogLoadingMore) {
+                        CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
+                            strokeWidth = 3.dp,
+                        )
+                    } else if (query.isNotBlank() && catalogMoreError) {
+                        TextButton(
+                            onClick = {
+                                catalogMoreError = false
+                                catalogRetry++
                             },
                             modifier = Modifier.align(Alignment.BottomCenter),
                         ) {
@@ -1156,10 +1241,11 @@ private fun HomeScreen(
             }
 
             1 -> {
-                TabRow(
+                ScrollableTabRow(
                     selectedTabIndex = category,
                     containerColor = Color.Transparent,
                     contentColor = Accent,
+                    edgePadding = 0.dp,
                 ) {
                     categoryTitles.forEachIndexed { index, title ->
                         Tab(
@@ -1174,25 +1260,6 @@ private fun HomeScreen(
                         )
                     }
                 }
-
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = { Text("Поиск фильмов и сериалов") },
-                    singleLine = true,
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    trailingIcon = {
-                        if (query.isNotEmpty()) {
-                            IconButton(onClick = { query = "" }) {
-                                Icon(Icons.Default.Close, contentDescription = "Очистить")
-                            }
-                        }
-                    },
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                )
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
@@ -1252,176 +1319,34 @@ private fun HomeScreen(
                 }
             }
 
-            2 -> {
-                LazyColumn(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    item(key = "profile") {
-                        Surface(
-                            color = SurfaceDark,
-                            shape = RoundedCornerShape(24.dp),
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        ) {
-                            Column(Modifier.padding(20.dp)) {
-                                Text(
-                                    email.take(1).uppercase(),
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 24.sp,
-                                    modifier = Modifier
-                                        .background(Accent, RoundedCornerShape(18.dp))
-                                        .padding(horizontal = 18.dp, vertical = 12.dp),
-                                )
-                                Spacer(Modifier.height(14.dp))
-                                Text(email, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                                Text("Ваш профиль FOXrezka", color = TextDim, style = MaterialTheme.typography.bodySmall)
-                                Spacer(Modifier.height(14.dp))
-                                TextButton(onClick = onLogout) {
-                                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Выйти из аккаунта")
-                                }
-                            }
+            2 -> if (showRecentHistory) {
+                Column(Modifier.weight(1f).fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { showRecentHistory = false }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
                         }
-                    }
-
-                    item(key = "watch-stats") {
-                        Surface(
-                            color = SurfaceDark,
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(18.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("Время просмотра", color = TextDim, style = MaterialTheme.typography.bodySmall)
-                                    Text(
-                                        formatWatchTime(totalWatchedMs),
-                                        style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.Bold,
-                                    )
-                                }
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text("Завершено серий", color = TextDim, style = MaterialTheme.typography.bodySmall)
-                                    Text(
-                                        completedSeriesCount.toString(),
-                                        style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Accent,
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    item(key = "recent-title") {
                         Text(
                             "Смотрели недавно",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(top = 14.dp),
                         )
                     }
                     if (recent.isEmpty()) {
-                        item(key = "recent-empty") {
-                            Surface(
-                                color = SurfaceDark,
-                                shape = RoundedCornerShape(18.dp),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(
-                                    "Здесь появятся фильмы и серии, которые вы запустите в FOXrezka.",
-                                    color = TextDim,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.padding(18.dp),
-                                )
-                            }
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text("Здесь появятся фильмы и серии, которые вы запустите.", color = TextDim)
                         }
                     } else {
-                        items(recent, key = { it.path }) { watched ->
-                            Surface(
-                                onClick = { onOpen(watched.path) },
-                                color = SurfaceDark,
-                                shape = RoundedCornerShape(18.dp),
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Row(
-                                    Modifier.padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    AsyncImage(
-                                        model = watched.poster,
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(width = 58.dp, height = 82.dp)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(SurfaceHigher),
-                                    )
-                                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                                        Text(
-                                            watched.title,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        if (watched.subtitle.isNotBlank()) {
-                                            Spacer(Modifier.height(4.dp))
-                                            Text(
-                                                watched.subtitle,
-                                                color = TextDim,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                        Spacer(Modifier.height(6.dp))
-                                        Text(
-                                            java.text.DateFormat.getDateTimeInstance(
-                                                java.text.DateFormat.MEDIUM,
-                                                java.text.DateFormat.SHORT,
-                                            ).format(java.util.Date(watched.watchedAt)),
-                                            color = TextDim,
-                                            style = MaterialTheme.typography.labelSmall,
-                                        )
-                                    }
-                                    Icon(Icons.Default.PlayArrow, contentDescription = "Открыть", tint = Accent)
-                                }
-                            }
-                        }
-
-                        item(key = "favorites-title") {
-                            Text(
-                                "Избранное",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(top = 18.dp),
-                            )
-                        }
-                        if (favorites.isEmpty()) {
-                            item(key = "favorites-empty") {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            items(recent, key = { it.path }) { watched ->
                                 Surface(
-                                    color = SurfaceDark,
-                                    shape = RoundedCornerShape(18.dp),
-                                    modifier = Modifier.fillMaxWidth(),
-                                ) {
-                                    Text(
-                                        "Добавляйте фильмы и сериалы в избранное со страницы описания.",
-                                        color = TextDim,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        modifier = Modifier.padding(18.dp),
-                                    )
-                                }
-                            }
-                        } else {
-                            items(favorites, key = { "favorite:${it.path}" }) { favorite ->
-                                Surface(
-                                    onClick = { onOpen(favorite.path) },
+                                    onClick = { onOpen(watched.path) },
                                     color = SurfaceDark,
                                     shape = RoundedCornerShape(18.dp),
                                     modifier = Modifier.fillMaxWidth(),
@@ -1431,7 +1356,7 @@ private fun HomeScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         AsyncImage(
-                                            model = favorite.poster,
+                                            model = watched.poster,
                                             contentDescription = null,
                                             contentScale = ContentScale.Crop,
                                             modifier = Modifier
@@ -1440,16 +1365,139 @@ private fun HomeScreen(
                                                 .background(SurfaceHigher),
                                         )
                                         Column(Modifier.padding(start = 12.dp).weight(1f)) {
-                                            Text(favorite.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                                            Text(watched.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                                            if (watched.subtitle.isNotBlank()) {
+                                                Spacer(Modifier.height(4.dp))
+                                                Text(
+                                                    watched.subtitle,
+                                                    color = TextDim,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    maxLines = 2,
+                                                )
+                                            }
+                                            Spacer(Modifier.height(6.dp))
                                             Text(
-                                                favorite.info,
+                                                java.text.DateFormat.getDateTimeInstance(
+                                                    java.text.DateFormat.MEDIUM,
+                                                    java.text.DateFormat.SHORT,
+                                                ).format(java.util.Date(watched.watchedAt)),
                                                 color = TextDim,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                maxLines = 2,
+                                                style = MaterialTheme.typography.labelSmall,
                                             )
                                         }
-                                        Icon(Icons.Default.Favorite, contentDescription = "В избранном", tint = Accent)
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "Открыть", tint = Accent)
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item(key = "profile") {
+                        Surface(
+                            color = SurfaceDark,
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    email.take(1).uppercase(),
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 20.sp,
+                                    modifier = Modifier
+                                        .background(Accent, RoundedCornerShape(14.dp))
+                                        .padding(horizontal = 16.dp, vertical = 11.dp),
+                                )
+                                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                    Text(email, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                    Text("FOXrezka", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "recent-entry") {
+                        Surface(
+                            onClick = { showRecentHistory = true },
+                            color = SurfaceDark,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Смотрели недавно", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "${recent.size} фильмов и сериалов",
+                                        color = TextDim,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+
+                    item(key = "favorites-title") {
+                        Text(
+                            "Избранное",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    if (favorites.isEmpty()) {
+                        item(key = "favorites-empty") {
+                            Surface(
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Добавляйте фильмы и сериалы в избранное со страницы описания.",
+                                    color = TextDim,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(16.dp),
+                                )
+                            }
+                        }
+                    } else {
+                        items(favorites, key = { "favorite:${it.path}" }) { favorite ->
+                            Surface(
+                                onClick = { onOpen(favorite.path) },
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AsyncImage(
+                                        model = favorite.poster,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(width = 52.dp, height = 72.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(SurfaceHigher),
+                                    )
+                                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                        Text(favorite.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                                        Text(favorite.info, color = TextDim, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                                    }
+                                    Icon(Icons.Default.Favorite, contentDescription = "В избранном", tint = Accent)
                                 }
                             }
                         }
@@ -1460,6 +1508,8 @@ private fun HomeScreen(
             else -> SettingsScreen(
                 selectedTheme = themeVariant,
                 onThemeChange = onThemeChange,
+                onLogout = onLogout,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
             )
         }
 
@@ -1491,49 +1541,38 @@ private fun HomeScreen(
 private fun SettingsScreen(
     selectedTheme: FoxThemeVariant,
     onThemeChange: (FoxThemeVariant) -> Unit,
+    onLogout: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Surface(
-            color = SurfaceDark,
-            shape = RoundedCornerShape(22.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(20.dp)) {
-                Text(
-                    "Настройки",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Раздел готовится. Здесь появятся параметры FOXrezka.",
-                    color = TextDim,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        }
+    var showLogoutConfirmation by remember { mutableStateOf(false) }
 
+    Column(
+        modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         Surface(
             color = SurfaceDark,
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Column(
-                Modifier.padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Оформление", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Оформление", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     FoxThemeVariant.entries.forEach { variant ->
                         FilterChip(
                             selected = selectedTheme == variant,
                             onClick = { onThemeChange(variant) },
                             label = { Text(variant.title) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Accent,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                            ),
                         )
                     }
                 }
@@ -1541,30 +1580,54 @@ private fun SettingsScreen(
         }
 
         Surface(
+            onClick = { showLogoutConfirmation = true },
             color = SurfaceDark,
             shape = RoundedCornerShape(18.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
-                Modifier.padding(18.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 15.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                AsyncImage(
-                    model = R.drawable.foxrezka_logo,
-                    contentDescription = "FOXrezka",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.size(52.dp),
+                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Accent)
+                Text(
+                    "Выйти из аккаунта",
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 12.dp).weight(1f),
                 )
-                Column(Modifier.padding(start = 14.dp)) {
-                    Text("FOXrezka", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Версия ${BuildConfig.VERSION_NAME}",
-                        color = TextDim,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
             }
         }
+
+        Spacer(Modifier.weight(1f))
+        Text(
+            "Версия ${BuildConfig.VERSION_NAME}",
+            color = TextDim,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        )
+    }
+
+    if (showLogoutConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showLogoutConfirmation = false },
+            title = { Text("Выйти из аккаунта?") },
+            text = { Text("Вы уверены?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLogoutConfirmation = false
+                        onLogout()
+                    },
+                ) {
+                    Text("Выйти")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutConfirmation = false }) {
+                    Text("Отмена")
+                }
+            },
+        )
     }
 }
 

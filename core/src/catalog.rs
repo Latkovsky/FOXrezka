@@ -27,8 +27,8 @@ pub fn parse_cards(html: &str) -> Vec<Card> {
     parse_cards_filtered(html, None)
 }
 
-pub fn parse_homepage_series(html: &str) -> Vec<Card> {
-    parse_cards_filtered(html, Some("series"))
+pub fn parse_homepage_cards(html: &str) -> Vec<Card> {
+    parse_cards_filtered(html, None)
 }
 
 fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
@@ -48,13 +48,27 @@ fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
         }
 
         let mut kind = "films".to_string();
+        let path_lower = path.to_ascii_lowercase();
         if let Some(cat) = item.select(&cat_sel).next() {
             let classes: Vec<&str> = cat.value().classes().collect();
             if classes.contains(&"series") {
                 kind = "series".to_string();
             } else if classes.contains(&"cartoons") {
                 kind = "cartoons".to_string();
+            } else if classes.contains(&"anime") || classes.contains(&"animation") {
+                kind = "anime".to_string();
+            } else if classes.contains(&"dorama") || classes.contains(&"dramy") {
+                kind = "doramas".to_string();
             }
+        }
+        if path_lower.contains("/series/") {
+            kind = "series".to_string();
+        } else if path_lower.contains("/cartoons/") {
+            kind = "cartoons".to_string();
+        } else if path_lower.contains("/animation/") {
+            kind = "anime".to_string();
+        } else if path_lower.contains("/dramy/") {
+            kind = "doramas".to_string();
         }
 
         if kind_filter.is_some_and(|filter| kind != filter) {
@@ -98,10 +112,10 @@ fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_homepage_series;
+    use super::parse_homepage_cards;
 
     #[test]
-    fn homepage_series_includes_all_series_in_source_order() {
+    fn homepage_cards_include_films_and_series_in_source_order() {
         let html = r#"
             <div class="b-content__inline_item" data-id="1" data-url="/films/one/">
                 <span class="cat films"></span>
@@ -111,21 +125,24 @@ mod tests {
                 <span class="cat series"></span>
                 <div class="b-content__inline_item-link"><a>Сериал 1</a></div>
             </div>
-            <div class="b-content__inline_item" data-id="3" data-url="/series/two/">
-                <span class="cat series"></span>
-                <div class="b-content__inline_item-link"><a>Сериал 2</a></div>
+            <div class="b-content__inline_item" data-id="3" data-url="/animation/anime/">
+                <span class="cat animation"></span>
+                <div class="b-content__inline_item-link"><a>Аниме</a></div>
             </div>
-            <div class="b-content__inline_item" data-id="4" data-url="/series/three/">
-                <span class="cat series"></span>
-                <div class="b-content__inline_item-link"><a>Сериал 3</a></div>
+            <div class="b-content__inline_item" data-id="4" data-url="/dramy/dorama/">
+                <span class="cat dramy"></span>
+                <div class="b-content__inline_item-link"><a>Дорама</a></div>
             </div>
         "#;
 
-        let cards = parse_homepage_series(html);
+        let cards = parse_homepage_cards(html);
 
-        assert_eq!(cards.len(), 3);
-        assert_eq!(cards[0].title, "Сериал 1");
-        assert_eq!(cards[1].title, "Сериал 2");
-        assert_eq!(cards[2].title, "Сериал 3");
+        assert_eq!(cards.len(), 4);
+        assert_eq!(cards[0].title, "Фильм");
+        assert_eq!(cards[0].kind, "films");
+        assert_eq!(cards[1].title, "Сериал 1");
+        assert_eq!(cards[1].kind, "series");
+        assert_eq!(cards[2].kind, "anime");
+        assert_eq!(cards[3].kind, "doramas");
     }
 }

@@ -46,8 +46,8 @@ private val GreenPalette = Palette(
 )
 
 private val DarkPalette = Palette(
-    accent = Color(0xFFB9A6FF),
-    accentSecondary = Color(0xFF8C77D9),
+    accent = Color(0xFF62F514),
+    accentSecondary = Color(0xFFB6FF59),
     background = Color(0xFF09090D),
     surface = Color(0xFF17171F),
     surfaceHigher = Color(0xFF242430),

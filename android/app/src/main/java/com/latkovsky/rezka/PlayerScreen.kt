@@ -2,7 +2,6 @@ package com.latkovsky.rezka
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -23,13 +22,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.TextButton
@@ -51,6 +56,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -79,6 +85,57 @@ private fun formatPlayerTime(milliseconds: Long): String {
     return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
 
+private enum class PlayerDialog {
+    SPEED,
+    EPISODE,
+}
+
+private enum class PlayerMenu {
+    QUALITY,
+    AUDIO,
+}
+
+@Composable
+private fun SelectionDialog(
+    title: String,
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                Modifier
+                    .width(340.dp)
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                options.forEachIndexed { index, label ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(index) }
+                            .padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = index == selectedIndex,
+                            onClick = { onSelect(index) },
+                        )
+                        Text(label, modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Готово") }
+        },
+    )
+}
+
 @OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
@@ -93,15 +150,17 @@ fun PlayerScreen(
     onBack: () -> Unit,
     onSelectTranslator: (String, Long) -> Unit,
     onSelectEpisode: (String) -> Unit,
-    onWatchTimeDelta: (Long) -> Unit,
     onEpisodeCompleted: () -> Unit,
     onSavePosition: (positionMs: Long, durationMs: Long) -> Unit,
 ) {
     val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
     var selectedQuality by remember { mutableIntStateOf(0) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(false) }
+    var activeDialog by remember { mutableStateOf<PlayerDialog?>(null) }
+    var activeMenu by remember { mutableStateOf<PlayerMenu?>(null) }
+    var showControls by remember { mutableStateOf(true) }
+    var controlsLocked by remember { mutableStateOf(false) }
+    var selectedSpeed by remember { mutableStateOf(1f) }
     var currentPosition by remember { mutableStateOf(startPositionMs) }
     var seekFeedback by remember { mutableStateOf<String?>(null) }
 
@@ -158,16 +217,14 @@ fun PlayerScreen(
     LaunchedEffect(player) {
         var lastPositionSave = 0L
         while (isActive) {
-            val sampleStarted = SystemClock.elapsedRealtime()
             delay(1_000)
-            val now = SystemClock.elapsedRealtime()
             currentPosition = player.currentPosition
             if (player.isPlaying && player.playbackState == Player.STATE_READY) {
-                onWatchTimeDelta((now - sampleStarted).coerceIn(0L, 1_500L))
+                lastPositionSave += 1_000L
             }
-            if (player.isPlaying && now - lastPositionSave >= 5_000L) {
+            if (lastPositionSave >= 5_000L) {
                 onSavePosition(player.currentPosition, player.duration.coerceAtLeast(0L))
-                lastPositionSave = now
+                lastPositionSave = 0L
             }
         }
     }
@@ -227,6 +284,7 @@ fun PlayerScreen(
                 .pointerInput(player) {
                     detectTapGestures(
                         onDoubleTap = { tap ->
+                            if (controlsLocked) return@detectTapGestures
                             when {
                                 tap.x < size.width * 0.4f -> {
                                     player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0))
@@ -239,7 +297,9 @@ fun PlayerScreen(
                                 }
                             }
                         },
-                        onTap = { showControls = !showControls },
+                        onTap = {
+                            if (!controlsLocked) showControls = !showControls
+                        },
                     )
                 },
         )
@@ -258,7 +318,7 @@ fun PlayerScreen(
             )
         }
 
-        if (showControls) {
+        if (showControls && !controlsLocked) {
             Row(
                 Modifier
                     .align(Alignment.TopStart)
@@ -277,161 +337,210 @@ fun PlayerScreen(
                         Text(subtitle, color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     }
                 }
-                IconButton(onClick = { showSettings = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "Настройки видео", tint = Color.White)
+                TextButton(onClick = { activeDialog = PlayerDialog.SPEED }) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Скорость", color = Color.White)
+                        Text("${selectedSpeed}×", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Box {
+                    TextButton(onClick = { activeMenu = PlayerMenu.QUALITY }) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Качество", color = Color.White)
+                            Text(
+                                qualities.getOrNull(selectedQuality)?.label.orEmpty(),
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = activeMenu == PlayerMenu.QUALITY,
+                        onDismissRequest = { activeMenu = null },
+                    ) {
+                        qualities.forEachIndexed { index, quality ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        quality.label,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                onClick = {
+                                    selectedQuality = index
+                                    val position = player.currentPosition
+                                    player.setMediaItem(MediaItem.fromUri(quality.url), position)
+                                    player.prepare()
+                                    player.play()
+                                    activeMenu = null
+                                },
+                                trailingIcon = {
+                                    if (index == selectedQuality) {
+                                        Icon(Icons.Default.Check, contentDescription = "Выбрано")
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+                if (translators.isNotEmpty()) {
+                    Box {
+                        TextButton(onClick = { activeMenu = PlayerMenu.AUDIO }) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Озвучка", color = Color.White)
+                                Text(
+                                    translators.firstOrNull { it.id == selectedTranslatorId }?.name.orEmpty(),
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = activeMenu == PlayerMenu.AUDIO,
+                            onDismissRequest = { activeMenu = null },
+                        ) {
+                            translators.forEach { translator ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            translator.name + if (translator.premium) " · Premium" else "",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    },
+                                    onClick = {
+                                        if (translator.id != selectedTranslatorId) {
+                                            player.pause()
+                                            onSelectTranslator(translator.id, player.currentPosition)
+                                        }
+                                        activeMenu = null
+                                    },
+                                    trailingIcon = {
+                                        if (translator.id == selectedTranslatorId) {
+                                            Icon(Icons.Default.Check, contentDescription = "Выбрано")
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                if (episodes.isNotEmpty()) {
+                    TextButton(onClick = { activeDialog = PlayerDialog.EPISODE }) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Серия", color = Color.White)
+                            Text(
+                                episodes.firstOrNull { it.episodeId == selectedEpisodeId }?.title.orEmpty(),
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+                IconButton(onClick = { controlsLocked = true; showControls = false }) {
+                    Icon(Icons.Default.LockOpen, contentDescription = "Заблокировать управление", tint = Color.White)
                 }
             }
-            Column(
+
+            Row(
                 Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.82f))))
-                    .padding(horizontal = 24.dp, vertical = 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.24f), RoundedCornerShape(32.dp))
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
             ) {
-                IconButton(onClick = {
-                    if (player.isPlaying) player.pause() else player.play()
-                    showControls = true
-                }) {
+                IconButton(
+                    onClick = {
+                        player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0))
+                        seekFeedback = "−10 сек"
+                    },
+                    modifier = Modifier.size(56.dp),
+                ) {
+                    Icon(Icons.Default.Replay10, contentDescription = "Назад на 10 секунд", tint = Color.White, modifier = Modifier.size(34.dp))
+                }
+                IconButton(
+                    onClick = { if (player.isPlaying) player.pause() else player.play() },
+                    modifier = Modifier.size(72.dp),
+                ) {
                     Icon(
                         if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (player.isPlaying) "Пауза" else "Продолжить",
                         tint = Color.White,
-                        modifier = Modifier.size(36.dp),
+                        modifier = Modifier.size(54.dp),
                     )
                 }
+                IconButton(
+                    onClick = {
+                        val target = player.currentPosition + 10_000
+                        player.seekTo(if (player.duration > 0) minOf(target, player.duration) else target)
+                        seekFeedback = "+10 сек"
+                    },
+                    modifier = Modifier.size(56.dp),
+                ) {
+                    Icon(Icons.Default.Forward10, contentDescription = "Вперёд на 10 секунд", tint = Color.White, modifier = Modifier.size(34.dp))
+                }
+            }
+
+            Row(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.8f))))
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(formatPlayerTime(currentPosition), color = Color.White, style = MaterialTheme.typography.labelLarge)
                 Slider(
                     value = currentPosition.toFloat().coerceAtLeast(0f),
                     onValueChange = { currentPosition = it.toLong() },
                     valueRange = 0f..player.duration.coerceAtLeast(1L).toFloat(),
                     onValueChangeFinished = { player.seekTo(currentPosition) },
+                    modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
                 )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatPlayerTime(currentPosition), color = Color.White, style = MaterialTheme.typography.labelSmall)
-                    Text(formatPlayerTime(player.duration.coerceAtLeast(0L)), color = Color.White, style = MaterialTheme.typography.labelSmall)
-                }
+                Text(formatPlayerTime(player.duration.coerceAtLeast(0L)), color = Color.White, style = MaterialTheme.typography.labelLarge)
             }
         }
 
-        if (showSettings) {
-            AlertDialog(
-                onDismissRequest = { showSettings = false },
-                title = { Text("Настройки видео") },
-                text = {
-                    Column(
-                        Modifier
-                            .width(340.dp)
-                            .heightIn(max = 420.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Text("Качество", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                        qualities.forEachIndexed { index, quality ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val position = player.currentPosition
-                                        player.setMediaItem(
-                                            MediaItem.fromUri(quality.url),
-                                            position,
-                                        )
-                                        player.prepare()
-                                        selectedQuality = index
-                                        showSettings = false
-                                    }
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                RadioButton(
-                                    selected = selectedQuality == index,
-                                    onClick = {
-                                        val position = player.currentPosition
-                                        player.setMediaItem(
-                                            MediaItem.fromUri(quality.url),
-                                            position,
-                                        )
-                                        player.prepare()
-                                        selectedQuality = index
-                                        showSettings = false
-                                    },
-                                )
-                                Column(Modifier.padding(start = 8.dp)) {
-                                    Text(quality.label, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
-                        }
+        if (controlsLocked) {
+            IconButton(
+                onClick = { controlsLocked = false; showControls = true },
+                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp),
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = "Разблокировать управление", tint = Color.White)
+            }
+        }
 
-                        if (translators.isNotEmpty()) {
-                            Text("Озвучка", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            translators.forEach { translator ->
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            if (translator.id != selectedTranslatorId) {
-                                                player.pause()
-                                                onSelectTranslator(translator.id, player.currentPosition)
-                                            }
-                                            showSettings = false
-                                        }
-                                        .padding(vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    RadioButton(
-                                        selected = translator.id == selectedTranslatorId,
-                                        onClick = {
-                                            if (translator.id != selectedTranslatorId) {
-                                                player.pause()
-                                                onSelectTranslator(translator.id, player.currentPosition)
-                                            }
-                                            showSettings = false
-                                        },
-                                    )
-                                    Text(
-                                        translator.name + if (translator.premium) " · Premium" else "",
-                                        fontWeight = if (translator.premium) FontWeight.SemiBold else FontWeight.Normal,
-                                    )
-                                }
-                            }
-
-                        }
-                        if (episodes.isNotEmpty()) {
-                            Text("Серия", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            episodes.forEach { episode ->
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            if (episode.episodeId != selectedEpisodeId) {
-                                                player.pause()
-                                                onSelectEpisode(episode.episodeId)
-                                            }
-                                            showSettings = false
-                                        }
-                                        .padding(vertical = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    RadioButton(
-                                        selected = episode.episodeId == selectedEpisodeId,
-                                        onClick = {
-                                            if (episode.episodeId != selectedEpisodeId) {
-                                                player.pause()
-                                                onSelectEpisode(episode.episodeId)
-                                            }
-                                            showSettings = false
-                                        },
-                                    )
-                                    Text(episode.title, maxLines = 1)
-                                }
-                            }
-                        }
-                    }
+        when (activeDialog) {
+            PlayerDialog.SPEED -> SelectionDialog(
+                title = "Скорость воспроизведения",
+                options = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f).map { "${it}×" },
+                selectedIndex = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f).indexOf(selectedSpeed),
+                onSelect = { index ->
+                    selectedSpeed = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)[index]
+                    player.setPlaybackSpeed(selectedSpeed)
+                    activeDialog = null
                 },
-                confirmButton = {
-                    TextButton(onClick = { showSettings = false }) { Text("Готово") }
-                },
+                onDismiss = { activeDialog = null },
             )
+            PlayerDialog.EPISODE -> SelectionDialog(
+                title = "Выбрать серию",
+                options = episodes.map { it.title },
+                selectedIndex = episodes.indexOfFirst { it.episodeId == selectedEpisodeId },
+                onSelect = { index ->
+                    val episode = episodes[index]
+                    if (episode.episodeId != selectedEpisodeId) {
+                        player.pause()
+                        onSelectEpisode(episode.episodeId)
+                    }
+                    activeDialog = null
+                },
+                onDismiss = { activeDialog = null },
+            )
+            null -> Unit
         }
 
         if (error != null) {
