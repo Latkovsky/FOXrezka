@@ -15,8 +15,6 @@
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-Compose-7F52FF?logo=kotlin&logoColor=white)
 ![Rust](https://img.shields.io/badge/Core-Rust-orange?logo=rust&logoColor=white)
-![Версия](https://img.shields.io/badge/версия-1.0.8-blue)
-
 </div>
 
 ---
@@ -33,7 +31,7 @@
 
 ## Установка
 
-**[Скачать FOXrezka 1.0.8 для Android](https://github.com/Latkovsky/FOXrezka/releases/latest)**
+**[Скачать последнюю версию FOXrezka для Android](https://github.com/Latkovsky/FOXrezka/releases/latest)**
 
 Скачайте APK из последнего релиза, откройте его на телефоне и подтвердите установку. При необходимости разрешите установку приложений из выбранного источника в настройках Android.
 
