@@ -13,7 +13,7 @@
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-Compose-7F52FF?logo=kotlin&logoColor=white)
 ![Rust](https://img.shields.io/badge/Core-Rust-orange?logo=rust&logoColor=white)
-![Версия](https://img.shields.io/badge/версия-1.0.1-blue)
+![Версия](https://img.shields.io/badge/версия-1.0.3-blue)
 
 </div>
 
