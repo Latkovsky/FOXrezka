@@ -736,6 +736,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -763,9 +769,13 @@ internal interface UniffiLib : Library {
     ): Pointer
     fun uniffi_rezka_core_fn_method_client_category(`ptr`: Pointer,`kind`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_rezka_core_fn_method_client_category_page(`ptr`: Pointer,`kind`: RustBuffer.ByValue,`page`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_rezka_core_fn_method_client_export_cookies(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_rezka_core_fn_method_client_homepage(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_rezka_core_fn_method_client_homepage_page(`ptr`: Pointer,`page`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_rezka_core_fn_method_client_import_cookies(`ptr`: Pointer,`cookies`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -778,6 +788,8 @@ internal interface UniffiLib : Library {
     fun uniffi_rezka_core_fn_method_client_profile(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_rezka_core_fn_method_client_search(`ptr`: Pointer,`query`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_rezka_core_fn_method_client_search_page(`ptr`: Pointer,`query`: RustBuffer.ByValue,`page`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_rezka_core_fn_method_client_streams(`ptr`: Pointer,`detail`: RustBuffer.ByValue,`translatorId`: RustBuffer.ByValue,`seasonId`: RustBuffer.ByValue,`episodeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -895,9 +907,13 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_rezka_core_checksum_method_client_category(
     ): Short
+    fun uniffi_rezka_core_checksum_method_client_category_page(
+    ): Short
     fun uniffi_rezka_core_checksum_method_client_export_cookies(
     ): Short
     fun uniffi_rezka_core_checksum_method_client_homepage(
+    ): Short
+    fun uniffi_rezka_core_checksum_method_client_homepage_page(
     ): Short
     fun uniffi_rezka_core_checksum_method_client_import_cookies(
     ): Short
@@ -910,6 +926,8 @@ internal interface UniffiLib : Library {
     fun uniffi_rezka_core_checksum_method_client_profile(
     ): Short
     fun uniffi_rezka_core_checksum_method_client_search(
+    ): Short
+    fun uniffi_rezka_core_checksum_method_client_search_page(
     ): Short
     fun uniffi_rezka_core_checksum_method_client_streams(
     ): Short
@@ -935,10 +953,16 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_rezka_core_checksum_method_client_category() != 7981.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_rezka_core_checksum_method_client_category_page() != 59848.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_rezka_core_checksum_method_client_export_cookies() != 15045.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rezka_core_checksum_method_client_homepage() != 56324.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rezka_core_checksum_method_client_homepage_page() != 26979.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rezka_core_checksum_method_client_import_cookies() != 51747.toShort()) {
@@ -957,6 +981,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rezka_core_checksum_method_client_search() != 65241.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_rezka_core_checksum_method_client_search_page() != 36374.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_rezka_core_checksum_method_client_streams() != 48106.toShort()) {
@@ -1011,6 +1038,29 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * @suppress
  * */
 object NoPointer
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
 
 /**
  * @suppress
@@ -1258,9 +1308,13 @@ public interface ClientInterface {
     
     fun `category`(`kind`: kotlin.String): List<Card>
     
+    fun `categoryPage`(`kind`: kotlin.String, `page`: kotlin.UInt): List<Card>
+    
     fun `exportCookies`(): kotlin.String
     
     fun `homepage`(): List<Card>
+    
+    fun `homepagePage`(`page`: kotlin.UInt): List<Card>
     
     fun `importCookies`(`cookies`: kotlin.String)
     
@@ -1273,6 +1327,8 @@ public interface ClientInterface {
     fun `profile`(): Profile
     
     fun `search`(`query`: kotlin.String): List<Card>
+    
+    fun `searchPage`(`query`: kotlin.String, `page`: kotlin.UInt): List<Card>
     
     fun `streams`(`detail`: MovieDetail, `translatorId`: kotlin.String, `seasonId`: kotlin.String, `episodeId`: kotlin.String): StreamSet
     
@@ -1380,6 +1436,19 @@ open class Client: Disposable, AutoCloseable, ClientInterface {
     }
     
 
+    
+    @Throws(CoreException::class)override fun `categoryPage`(`kind`: kotlin.String, `page`: kotlin.UInt): List<Card> {
+            return FfiConverterSequenceTypeCard.lift(
+    callWithPointer {
+    uniffiRustCallWithError(CoreException) { _status ->
+    UniffiLib.INSTANCE.uniffi_rezka_core_fn_method_client_category_page(
+        it, FfiConverterString.lower(`kind`),FfiConverterUInt.lower(`page`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `exportCookies`(): kotlin.String {
             return FfiConverterString.lift(
     callWithPointer {
@@ -1399,6 +1468,19 @@ open class Client: Disposable, AutoCloseable, ClientInterface {
     uniffiRustCallWithError(CoreException) { _status ->
     UniffiLib.INSTANCE.uniffi_rezka_core_fn_method_client_homepage(
         it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(CoreException::class)override fun `homepagePage`(`page`: kotlin.UInt): List<Card> {
+            return FfiConverterSequenceTypeCard.lift(
+    callWithPointer {
+    uniffiRustCallWithError(CoreException) { _status ->
+    UniffiLib.INSTANCE.uniffi_rezka_core_fn_method_client_homepage_page(
+        it, FfiConverterUInt.lower(`page`),_status)
 }
     }
     )
@@ -1473,6 +1555,19 @@ open class Client: Disposable, AutoCloseable, ClientInterface {
     uniffiRustCallWithError(CoreException) { _status ->
     UniffiLib.INSTANCE.uniffi_rezka_core_fn_method_client_search(
         it, FfiConverterString.lower(`query`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(CoreException::class)override fun `searchPage`(`query`: kotlin.String, `page`: kotlin.UInt): List<Card> {
+            return FfiConverterSequenceTypeCard.lift(
+    callWithPointer {
+    uniffiRustCallWithError(CoreException) { _status ->
+    UniffiLib.INSTANCE.uniffi_rezka_core_fn_method_client_search_page(
+        it, FfiConverterString.lower(`query`),FfiConverterUInt.lower(`page`),_status)
 }
     }
     )

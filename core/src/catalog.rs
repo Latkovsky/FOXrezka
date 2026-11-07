@@ -24,18 +24,14 @@ pub fn normalize_path(path: &str) -> String {
 }
 
 pub fn parse_cards(html: &str) -> Vec<Card> {
-    parse_cards_filtered(html, None, None)
+    parse_cards_filtered(html, None)
 }
 
-pub fn parse_homepage_series(html: &str, limit: usize) -> Vec<Card> {
-    parse_cards_filtered(html, Some("series"), Some(limit))
+pub fn parse_homepage_series(html: &str) -> Vec<Card> {
+    parse_cards_filtered(html, Some("series"))
 }
 
-fn parse_cards_filtered(
-    html: &str,
-    kind_filter: Option<&str>,
-    limit: Option<usize>,
-) -> Vec<Card> {
+fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
     let doc = Html::parse_document(html);
     let item_sel = Selector::parse("div.b-content__inline_item").unwrap();
     let img_sel = Selector::parse("img").unwrap();
@@ -96,9 +92,6 @@ fn parse_cards_filtered(
             info,
             kind,
         });
-        if limit.is_some_and(|limit| cards.len() >= limit) {
-            break;
-        }
     }
     cards
 }
@@ -108,7 +101,7 @@ mod tests {
     use super::parse_homepage_series;
 
     #[test]
-    fn homepage_series_filters_and_limits_cards_in_order() {
+    fn homepage_series_includes_all_series_in_source_order() {
         let html = r#"
             <div class="b-content__inline_item" data-id="1" data-url="/films/one/">
                 <span class="cat films"></span>
@@ -128,10 +121,11 @@ mod tests {
             </div>
         "#;
 
-        let cards = parse_homepage_series(html, 2);
+        let cards = parse_homepage_series(html);
 
-        assert_eq!(cards.len(), 2);
+        assert_eq!(cards.len(), 3);
         assert_eq!(cards[0].title, "Сериал 1");
         assert_eq!(cards[1].title, "Сериал 2");
+        assert_eq!(cards[2].title, "Сериал 3");
     }
 }

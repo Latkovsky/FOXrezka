@@ -110,29 +110,54 @@ impl Client {
     }
 
     pub fn homepage(&self) -> Result<Vec<Card>, CoreError> {
-        let url = format!("{}/", http::BASE);
+        self.homepage_page(1)
+    }
+
+    pub fn homepage_page(&self, page: u32) -> Result<Vec<Card>, CoreError> {
+        let url = if page <= 1 {
+            format!("{}/", http::BASE)
+        } else {
+            format!("{}/page/{page}/", http::BASE)
+        };
         let html = self.http.get_html(&url)?;
         guard_login(&html)?;
-        Ok(catalog::parse_homepage_series(&html, 12))
+        Ok(catalog::parse_homepage_series(&html))
     }
 
     pub fn category(&self, kind: String) -> Result<Vec<Card>, CoreError> {
+        self.category_page(kind, 1)
+    }
+
+    pub fn category_page(&self, kind: String, page: u32) -> Result<Vec<Card>, CoreError> {
         let section = match kind.as_str() {
             "films" | "series" | "cartoons" => kind,
             _ => "films".to_string(),
         };
-        self.load_cards(&format!("{}/{}/", http::BASE, section))
+        let url = if page <= 1 {
+            format!("{}/{section}/", http::BASE)
+        } else {
+            format!("{}/{section}/page/{page}/", http::BASE)
+        };
+        self.load_cards(&url)
     }
 
     pub fn search(&self, query: String) -> Result<Vec<Card>, CoreError> {
+        self.search_page(query, 1)
+    }
+
+    pub fn search_page(&self, query: String, page: u32) -> Result<Vec<Card>, CoreError> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let url = format!(
-            "{}/search/?do=search&subaction=search&q={}",
-            http::BASE,
-            urlencoding::encode(query.trim())
-        );
+        let query = urlencoding::encode(query.trim());
+        let url = if page <= 1 {
+            format!("{}/search/?do=search&subaction=search&q={query}", http::BASE)
+        } else {
+            format!(
+                "{}/search/page/{page}/?do=search&subaction=search&q={query}",
+                http::BASE
+            )
+        };
         self.load_cards(&url)
     }
 

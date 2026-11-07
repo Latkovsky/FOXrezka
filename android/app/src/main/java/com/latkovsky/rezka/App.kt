@@ -1,8 +1,16 @@
 package com.latkovsky.rezka
 
 import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +37,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,12 +47,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -65,11 +77,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,10 +104,13 @@ import coil.compose.AsyncImage
 import com.latkovsky.rezka.core.Card
 import com.latkovsky.rezka.core.Client
 import com.latkovsky.rezka.core.CoreException
+import com.latkovsky.rezka.core.Episode
 import com.latkovsky.rezka.core.MovieDetail
 import com.latkovsky.rezka.core.StreamSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -106,7 +124,7 @@ private const val HOME_CACHE_KEY = "homepage_series"
 
 private sealed interface Screen {
     data object Home : Screen
-    data class Detail(val detail: MovieDetail) : Screen
+    data class Detail(val detail: MovieDetail, val resumeItem: WatchedItem? = null) : Screen
     data class Play(val args: PlayerArgs) : Screen
 }
 
@@ -127,7 +145,111 @@ private data class WatchedItem(
     val poster: String,
     val subtitle: String,
     val watchedAt: Long,
+    val translatorId: String,
+    val seasonId: String,
+    val episodeId: String,
+    val positionMs: Long,
 )
+
+private data class FavoriteItem(
+    val path: String,
+    val title: String,
+    val poster: String,
+    val info: String,
+)
+
+private const val FAVORITES_KEY = "favorites"
+private const val TOTAL_WATCHED_MS_KEY = "total_watched_ms"
+private const val COMPLETED_SERIES_KEY = "completed_series_episodes"
+private const val THEME_KEY = "appearance_theme"
+private const val ENCRYPTED_COOKIES_KEY = "cookies_encrypted"
+private const val SESSION_KEY_ALIAS = "foxrezka_session_key"
+
+private fun sessionKey(): SecretKey {
+    val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    (keyStore.getKey(SESSION_KEY_ALIAS, null) as? SecretKey)?.let { return it }
+
+    val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+    generator.init(
+        KeyGenParameterSpec.Builder(
+            SESSION_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .build(),
+    )
+    return generator.generateKey()
+}
+
+private fun encryptSession(value: String): String {
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(Cipher.ENCRYPT_MODE, sessionKey())
+    val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+    return Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)
+}
+
+private fun decryptSession(value: String): String {
+    val payload = Base64.decode(value, Base64.NO_WRAP)
+    require(payload.size > 12) { "Повреждённые данные сессии" }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(
+        Cipher.DECRYPT_MODE,
+        sessionKey(),
+        GCMParameterSpec(128, payload.copyOfRange(0, 12)),
+    )
+    return cipher.doFinal(payload.copyOfRange(12, payload.size)).toString(Charsets.UTF_8)
+}
+
+private fun loadSessionCookies(prefs: android.content.SharedPreferences): String? {
+    prefs.getString(ENCRYPTED_COOKIES_KEY, null)?.let { return decryptSession(it) }
+    val legacy = prefs.getString("cookies", null)?.takeIf { it.isNotBlank() } ?: return null
+    val encrypted = encryptSession(legacy)
+    prefs.edit()
+        .putString(ENCRYPTED_COOKIES_KEY, encrypted)
+        .remove("cookies")
+        .apply()
+    return legacy
+}
+
+private fun loadFavorites(prefs: android.content.SharedPreferences): List<FavoriteItem> =
+    runCatching {
+        val items = JSONArray(prefs.getString(FAVORITES_KEY, "[]"))
+        buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val path = item.optString("path")
+                if (path.isNotBlank()) {
+                    add(
+                        FavoriteItem(
+                            path = path,
+                            title = item.optString("title"),
+                            poster = item.optString("poster"),
+                            info = item.optString("info"),
+                        ),
+                    )
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+private fun saveFavorites(
+    prefs: android.content.SharedPreferences,
+    favorites: List<FavoriteItem>,
+) {
+    val json = JSONArray()
+    favorites.forEach { favorite ->
+        json.put(
+            JSONObject()
+                .put("path", favorite.path)
+                .put("title", favorite.title)
+                .put("poster", favorite.poster)
+                .put("info", favorite.info),
+        )
+    }
+    prefs.edit().putString(FAVORITES_KEY, json.toString()).apply()
+}
 
 private fun loadRecent(prefs: android.content.SharedPreferences): List<WatchedItem> =
     runCatching {
@@ -144,6 +266,10 @@ private fun loadRecent(prefs: android.content.SharedPreferences): List<WatchedIt
                             poster = item.optString("poster"),
                             subtitle = item.optString("subtitle"),
                             watchedAt = item.optLong("watchedAt"),
+                            translatorId = item.optString("translatorId"),
+                            seasonId = item.optString("seasonId"),
+                            episodeId = item.optString("episodeId"),
+                            positionMs = item.optLong("positionMs"),
                         ),
                     )
                 }
@@ -160,7 +286,11 @@ private fun saveRecent(prefs: android.content.SharedPreferences, items: List<Wat
                 .put("title", item.title)
                 .put("poster", item.poster)
                 .put("subtitle", item.subtitle)
-                .put("watchedAt", item.watchedAt),
+                .put("watchedAt", item.watchedAt)
+                .put("translatorId", item.translatorId)
+                .put("seasonId", item.seasonId)
+                .put("episodeId", item.episodeId)
+                .put("positionMs", item.positionMs),
         )
     }
     prefs.edit().putString(RECENT_KEY, json.toString()).apply()
@@ -211,6 +341,13 @@ private fun saveCachedHomepage(
 private fun resumeKey(path: String, translator: String, season: String, episode: String) =
     "pos:$path|$translator|$season|$episode"
 
+private fun formatWatchTime(milliseconds: Long): String {
+    val minutes = (milliseconds / 60_000L).coerceAtLeast(0L)
+    val hours = minutes / 60
+    val remainingMinutes = minutes % 60
+    return if (hours > 0) "$hours ч $remainingMinutes мин" else "$minutes мин"
+}
+
 private fun Throwable.userMessage(): String = when (this) {
     is CoreException.Auth -> msg
     is CoreException.Network -> msg
@@ -228,27 +365,41 @@ fun App() {
     var loggedIn by remember { mutableStateOf(false) }
     var email by remember { mutableStateOf("") }
     var recent by remember { mutableStateOf(loadRecent(prefs)) }
+    var favorites by remember { mutableStateOf(loadFavorites(prefs)) }
     var cachedHome by remember { mutableStateOf(loadCachedHomepage(prefs)) }
+    var totalWatchedMs by remember { mutableLongStateOf(prefs.getLong(TOTAL_WATCHED_MS_KEY, 0L)) }
+    var completedSeriesEpisodes by remember {
+        mutableStateOf(prefs.getStringSet(COMPLETED_SERIES_KEY, emptySet()).orEmpty().toSet())
+    }
+    var selectedTheme by remember {
+        mutableStateOf(FoxThemeVariant.fromKey(prefs.getString(THEME_KEY, "green")))
+    }
     var selectedDestination by rememberSaveable { mutableIntStateOf(0) }
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
+        setFoxTheme(selectedTheme)
+    }
+
+    LaunchedEffect(Unit) {
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                val saved = prefs.getString("cookies", null)
-                if (saved.isNullOrBlank()) return@runCatching null
+                val saved = loadSessionCookies(prefs) ?: return@runCatching null
                 Core.client.importCookies(saved)
                 Core.client.profile()
-            }.getOrNull()
+            }
         }
-        if (result?.loggedIn == true) {
+        if (result.getOrNull()?.loggedIn == true) {
             loggedIn = true
-            email = result.email
+            email = result.getOrNull()?.email.orEmpty()
         } else {
             withContext(Dispatchers.IO) { Core.client.logout() }
-            prefs.edit().remove("cookies").apply()
+            if (result.isFailure) {
+                error = "Не удалось восстановить сохранённую сессию. Войдите снова."
+            }
+            prefs.edit().remove("cookies").remove(ENCRYPTED_COOKIES_KEY).apply()
         }
         booting = false
     }
@@ -257,12 +408,21 @@ fun App() {
         email = profileEmail
         loggedIn = true
         scope.launch(Dispatchers.IO) {
-            val cookies = runCatching { Core.client.exportCookies() }.getOrDefault("")
-            prefs.edit().putString("cookies", cookies).apply()
+            val result = runCatching {
+                val cookies = Core.client.exportCookies()
+                require(cookies.isNotBlank()) { "Пустая сессия" }
+                prefs.edit().putString(ENCRYPTED_COOKIES_KEY, encryptSession(cookies)).apply()
+                prefs.edit().remove("cookies").apply()
+            }
+            if (result.isFailure) {
+                withContext(Dispatchers.Main) {
+                    error = "Не удалось безопасно сохранить сессию."
+                }
+            }
         }
     }
 
-    fun openDetail(path: String) {
+    fun openDetail(path: String, resumeItem: WatchedItem? = null) {
         busy = true
         error = null
         scope.launch {
@@ -271,7 +431,7 @@ fun App() {
             }
             busy = false
             result
-                .onSuccess { screen = Screen.Detail(it) }
+                .onSuccess { screen = Screen.Detail(it, resumeItem) }
                 .onFailure { error = it.userMessage() }
         }
     }
@@ -281,6 +441,7 @@ fun App() {
         translatorId: String,
         seasonId: String,
         episodeId: String,
+        startAtMs: Long? = null,
     ) {
         busy = true
         error = null
@@ -308,6 +469,10 @@ fun App() {
                                 poster = detail.poster,
                                 subtitle = subtitle,
                                 watchedAt = System.currentTimeMillis(),
+                                translatorId = translatorId,
+                                seasonId = seasonId,
+                                episodeId = episodeId,
+                                positionMs = startAtMs ?: prefs.getLong(key, 0L),
                             ),
                         ) + recent.filterNot { it.path == detail.path }
                     ).take(30)
@@ -320,7 +485,7 @@ fun App() {
                             seasonId = seasonId,
                             episodeId = episodeId,
                             subtitle = subtitle,
-                            startMs = prefs.getLong(key, 0L),
+                            startMs = startAtMs ?: prefs.getLong(key, 0L),
                             resumeKey = key,
                         )
                     )
@@ -362,14 +527,24 @@ fun App() {
                     is Screen.Home -> HomeScreen(
                         email = email,
                         recent = recent,
+                        favorites = favorites,
+                        totalWatchedMs = totalWatchedMs,
+                        completedSeriesCount = completedSeriesEpisodes.size,
+                        themeVariant = selectedTheme,
+                        onThemeChange = { variant ->
+                            selectedTheme = variant
+                            setFoxTheme(variant)
+                            prefs.edit().putString(THEME_KEY, variant.key).apply()
+                        },
                         cachedHome = cachedHome,
                         onHomeCardsUpdated = { cachedHome = it },
                         prefs = prefs,
                         selectedDestination = selectedDestination,
                         onDestinationSelected = { selectedDestination = it },
+                        onContinue = { watched -> openDetail(watched.path, watched) },
                         onLogout = {
                             Core.client.logout()
-                            prefs.edit().remove("cookies").apply()
+                            prefs.edit().remove("cookies").remove(ENCRYPTED_COOKIES_KEY).apply()
                             loggedIn = false
                             screen = Screen.Home
                         },
@@ -378,8 +553,27 @@ fun App() {
 
                     is Screen.Detail -> DetailScreen(
                         detail = current.detail,
+                        resumeItem = current.resumeItem,
+                        isFavorite = favorites.any { it.path == current.detail.path },
                         busy = busy,
                         onBack = { screen = Screen.Home },
+                        onToggleFavorite = {
+                            val detail = current.detail
+                            val existing = favorites.firstOrNull { it.path == detail.path }
+                            favorites = if (existing == null) {
+                                listOf(
+                                    FavoriteItem(
+                                        path = detail.path,
+                                        title = detail.title,
+                                        poster = detail.poster,
+                                        info = detail.info,
+                                    ),
+                                ) + favorites
+                            } else {
+                                favorites.filterNot { it.path == detail.path }
+                            }
+                            saveFavorites(prefs, favorites)
+                        },
                         onPlay = { translatorId, seasonId, episodeId ->
                             startPlayback(current.detail, translatorId, seasonId, episodeId)
                         },
@@ -387,16 +581,70 @@ fun App() {
 
                     is Screen.Play -> {
                         val args = current.args
-                        PlayerScreen(
-                            qualities = args.streams.qualities,
-                            title = args.detail.title,
-                            subtitle = args.subtitle,
-                            startPositionMs = args.startMs,
-                            onBack = { screen = Screen.Detail(args.detail) },
-                            onSavePosition = { ms ->
-                                prefs.edit().putLong(args.resumeKey, ms).apply()
-                            },
-                        )
+                        key(args.resumeKey, args.startMs, args.streams.qualities.firstOrNull()?.url) {
+                            PlayerScreen(
+                                qualities = args.streams.qualities,
+                                translators = args.detail.translators,
+                                selectedTranslatorId = args.translatorId,
+                                episodes = args.detail.seasons
+                                    .firstOrNull { it.id == args.seasonId }
+                                    ?.episodes
+                                    .orEmpty(),
+                                selectedEpisodeId = args.episodeId,
+                                title = args.detail.title,
+                                subtitle = args.subtitle,
+                                startPositionMs = args.startMs,
+                                onBack = { screen = Screen.Detail(args.detail) },
+                                onSelectTranslator = { translatorId, position ->
+                                    startPlayback(
+                                        args.detail,
+                                        translatorId,
+                                        args.seasonId,
+                                        args.episodeId,
+                                        position,
+                                    )
+                                },
+                                onSelectEpisode = { episodeId ->
+                                    startPlayback(
+                                        args.detail,
+                                        args.translatorId,
+                                        args.seasonId,
+                                        episodeId,
+                                    )
+                                },
+                                onWatchTimeDelta = { deltaMs ->
+                                    totalWatchedMs += deltaMs
+                                    prefs.edit().putLong(TOTAL_WATCHED_MS_KEY, totalWatchedMs).apply()
+                                },
+                                onEpisodeCompleted = {
+                                    if (args.detail.isSeries) {
+                                        val key = "${args.detail.path}|${args.seasonId}|${args.episodeId}"
+                                        completedSeriesEpisodes = completedSeriesEpisodes + key
+                                        prefs.edit()
+                                            .putStringSet(COMPLETED_SERIES_KEY, completedSeriesEpisodes)
+                                            .apply()
+                                    }
+                                },
+                                onSavePosition = { ms, durationMs ->
+                                    prefs.edit().putLong(args.resumeKey, ms).apply()
+                                    prefs.edit()
+                                        .putLong("duration:${args.resumeKey.removePrefix("pos:")}", durationMs)
+                                        .apply()
+                                    recent = recent.map { item ->
+                                        if (item.path == args.detail.path &&
+                                            item.translatorId == args.translatorId &&
+                                            item.seasonId == args.seasonId &&
+                                            item.episodeId == args.episodeId
+                                        ) {
+                                            item.copy(positionMs = ms, watchedAt = System.currentTimeMillis())
+                                        } else {
+                                            item
+                                        }
+                                    }
+                                    saveRecent(prefs, recent)
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -453,11 +701,11 @@ private fun buildSubtitle(
 private fun SplashScreen() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "FOXrezka",
-                fontSize = 42.sp,
-                fontWeight = FontWeight.Black,
-                color = Accent,
+            AsyncImage(
+                model = R.drawable.foxrezka_logo,
+                contentDescription = "FOXrezka",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(width = 250.dp, height = 240.dp),
             )
             Spacer(Modifier.height(16.dp))
             CircularProgressIndicator(color = Accent, strokeWidth = 2.dp)
@@ -485,11 +733,11 @@ private fun LoginScreen(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            "FOXrezka",
-            fontSize = 42.sp,
-            fontWeight = FontWeight.Black,
-            color = Accent,
+        AsyncImage(
+            model = R.drawable.foxrezka_logo,
+            contentDescription = "FOXrezka",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.size(width = 250.dp, height = 240.dp),
         )
         Text(
             "Кино без лишнего",
@@ -571,11 +819,17 @@ private fun LoginScreen(
 private fun HomeScreen(
     email: String,
     recent: List<WatchedItem>,
+    favorites: List<FavoriteItem>,
+    totalWatchedMs: Long,
+    completedSeriesCount: Int,
+    themeVariant: FoxThemeVariant,
+    onThemeChange: (FoxThemeVariant) -> Unit,
     cachedHome: List<Card>,
     onHomeCardsUpdated: (List<Card>) -> Unit,
     prefs: android.content.SharedPreferences,
     selectedDestination: Int,
     onDestinationSelected: (Int) -> Unit,
+    onContinue: (WatchedItem) -> Unit,
     onLogout: () -> Unit,
     onOpen: (String) -> Unit,
 ) {
@@ -584,25 +838,41 @@ private fun HomeScreen(
     var homeCards by remember { mutableStateOf(cachedHome) }
     var catalogCards by remember { mutableStateOf<List<Card>>(emptyList()) }
     var homeLoading by remember { mutableStateOf(cachedHome.isEmpty()) }
+    var homeLoadingMore by remember { mutableStateOf(false) }
+    var homeHasMore by remember { mutableStateOf(true) }
+    var homeMoreError by remember { mutableStateOf(false) }
+    var homePage by remember { mutableIntStateOf(2) }
+    var homeRetry by remember { mutableIntStateOf(0) }
     var catalogLoading by remember { mutableStateOf(false) }
+    var catalogLoadingMore by remember { mutableStateOf(false) }
+    var catalogHasMore by remember { mutableStateOf(false) }
+    var catalogMoreError by remember { mutableStateOf(false) }
+    var catalogPage by remember { mutableIntStateOf(2) }
+    var catalogRetry by remember { mutableIntStateOf(0) }
     var homeError by remember { mutableStateOf<String?>(null) }
     var catalogError by remember { mutableStateOf<String?>(null) }
     var homeRefresh by remember { mutableIntStateOf(0) }
     var catalogRefresh by remember { mutableIntStateOf(0) }
+    val homeGridState = rememberLazyGridState()
+    val catalogGridState = rememberLazyGridState()
 
     val kinds = listOf("films", "series", "cartoons")
     val categoryTitles = listOf("Фильмы", "Сериалы", "Мультики")
-    val destinationTitles = listOf("Главная", "Каталог", "Профиль")
+    val destinationTitles = listOf("Главная", "Каталог", "Профиль", "Настройки")
 
     LaunchedEffect(homeRefresh) {
-        if (homeCards.isEmpty()) homeLoading = true
+        homeLoading = true
+        homeHasMore = false
         homeError = null
         val result = withContext(Dispatchers.IO) {
-            runCatching { Core.client.homepage() }
+            runCatching { Core.client.homepagePage(1u) }
         }
         result
             .onSuccess {
                 homeCards = it
+                homePage = 2
+                homeHasMore = it.isNotEmpty()
+                homeMoreError = false
                 onHomeCardsUpdated(homeCards)
                 saveCachedHomepage(prefs, homeCards)
             }
@@ -613,24 +883,111 @@ private fun HomeScreen(
         homeLoading = false
     }
 
+    LaunchedEffect(
+        selectedDestination,
+        homeCards.size,
+        homeHasMore,
+        homeLoading,
+        homeMoreError,
+        homePage,
+        homeRetry,
+    ) {
+        if (selectedDestination != 0 || !homeHasMore || homeLoading || homeLoadingMore || homeMoreError) {
+            return@LaunchedEffect
+        }
+        snapshotFlow { homeGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collectLatest { lastVisible ->
+                if (homeCards.isNotEmpty() && lastVisible >= homeCards.size - 5) {
+                    homeLoadingMore = true
+                    val page = homePage
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { Core.client.homepagePage(page.toUInt()) }
+                    }
+                    result
+                        .onSuccess { next ->
+                            val merged = (homeCards + next).distinctBy { it.path }
+                            homeHasMore = next.isNotEmpty() && merged.size > homeCards.size
+                            if (merged.size > homeCards.size) {
+                                homeCards = merged
+                                homePage = page + 1
+                                onHomeCardsUpdated(merged)
+                                saveCachedHomepage(prefs, merged)
+                            }
+                        }
+                        .onFailure { homeMoreError = true }
+                    homeLoadingMore = false
+                }
+            }
+    }
+
     LaunchedEffect(selectedDestination, category, query, catalogRefresh) {
         if (selectedDestination != 1) return@LaunchedEffect
         if (query.isNotBlank()) delay(500)
         catalogLoading = true
+        catalogHasMore = false
+        catalogMoreError = false
+        catalogPage = 2
         catalogError = null
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                if (query.isBlank()) Core.client.category(kinds[category])
-                else Core.client.search(query)
+                if (query.isBlank()) Core.client.categoryPage(kinds[category], 1u)
+                else Core.client.searchPage(query, 1u)
             }
         }
         result
-            .onSuccess { catalogCards = it }
+            .onSuccess {
+                catalogCards = it
+                catalogHasMore = it.isNotEmpty()
+            }
             .onFailure {
                 catalogError = it.userMessage()
                 catalogCards = emptyList()
             }
         catalogLoading = false
+    }
+
+    LaunchedEffect(
+        selectedDestination,
+        category,
+        query,
+        catalogCards.size,
+        catalogHasMore,
+        catalogLoading,
+        catalogMoreError,
+        catalogPage,
+        catalogRetry,
+    ) {
+        if (selectedDestination != 1 || catalogLoading || catalogLoadingMore ||
+            !catalogHasMore || catalogMoreError || catalogCards.isEmpty()
+        ) {
+            return@LaunchedEffect
+        }
+        snapshotFlow { catalogGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collectLatest { lastVisible ->
+                if (lastVisible >= catalogCards.size - 5) {
+                    catalogLoadingMore = true
+                    val page = catalogPage
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching {
+                            if (query.isBlank()) Core.client.categoryPage(kinds[category], page.toUInt())
+                            else Core.client.searchPage(query, page.toUInt())
+                        }
+                    }
+                    result
+                        .onSuccess { next ->
+                            val merged = (catalogCards + next).distinctBy { it.path }
+                            catalogHasMore = next.isNotEmpty() && merged.size > catalogCards.size
+                            if (merged.size > catalogCards.size) {
+                                catalogCards = merged
+                                catalogPage = page + 1
+                            }
+                        }
+                        .onFailure { catalogMoreError = true }
+                    catalogLoadingMore = false
+                }
+            }
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -664,6 +1021,73 @@ private fun HomeScreen(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
                 )
+                if (recent.isNotEmpty()) {
+                    Text(
+                        "Продолжить просмотр",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 18.dp, bottom = 8.dp),
+                    )
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(bottom = 14.dp),
+                    ) {
+                        items(recent.take(10), key = { "continue:${it.path}" }) { watched ->
+                            Surface(
+                                onClick = { onContinue(watched) },
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.width(260.dp),
+                            ) {
+                                Row(
+                                    Modifier.padding(9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AsyncImage(
+                                        model = watched.poster,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(width = 54.dp, height = 76.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(SurfaceHigher),
+                                    )
+                                    Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                                        Text(
+                                            watched.title,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            watched.subtitle.ifBlank { "Продолжить" },
+                                            color = TextDim,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (watched.positionMs > 0) {
+                                            val duration = prefs.getLong(
+                                                "duration:${watched.path}|${watched.translatorId}|${watched.seasonId}|${watched.episodeId}",
+                                                0L,
+                                            )
+                                            if (duration > 0) {
+                                                androidx.compose.material3.LinearProgressIndicator(
+                                                    progress = { (watched.positionMs.toFloat() / duration).coerceIn(0f, 1f) },
+                                                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                                                    color = Accent,
+                                                    trackColor = SurfaceHigher,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Icon(Icons.Default.PlayArrow, contentDescription = "Продолжить", tint = Accent)
+                                }
+                            }
+                        }
+                    }
+                }
                 if (homeError != null && homeCards.isNotEmpty()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 18.dp),
@@ -700,6 +1124,7 @@ private fun HomeScreen(
                         )
 
                         else -> LazyVerticalGrid(
+                            state = homeGridState,
                             columns = GridCells.Adaptive(minSize = 108.dp),
                             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -708,6 +1133,23 @@ private fun HomeScreen(
                             items(homeCards, key = { it.path }) { card ->
                                 PosterCard(card = card, onClick = { onOpen(card.path) })
                             }
+                        }
+                    }
+                    if (homeLoadingMore) {
+                        CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
+                            strokeWidth = 3.dp,
+                        )
+                    } else if (homeMoreError) {
+                        TextButton(
+                            onClick = {
+                                homeMoreError = false
+                                homeRetry++
+                            },
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        ) {
+                            Text("Не удалось загрузить. Повторить")
                         }
                     }
                 }
@@ -779,6 +1221,7 @@ private fun HomeScreen(
                         )
 
                         else -> LazyVerticalGrid(
+                            state = catalogGridState,
                             columns = GridCells.Adaptive(minSize = 108.dp),
                             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -789,10 +1232,27 @@ private fun HomeScreen(
                             }
                         }
                     }
+                    if (catalogLoadingMore) {
+                        CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
+                            strokeWidth = 3.dp,
+                        )
+                    } else if (catalogMoreError) {
+                        TextButton(
+                            onClick = {
+                                catalogMoreError = false
+                                catalogRetry++
+                            },
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        ) {
+                            Text("Не удалось загрузить. Повторить")
+                        }
+                    }
                 }
             }
 
-            else -> {
+            2 -> {
                 LazyColumn(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
@@ -822,6 +1282,38 @@ private fun HomeScreen(
                                     Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
                                     Spacer(Modifier.width(8.dp))
                                     Text("Выйти из аккаунта")
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "watch-stats") {
+                        Surface(
+                            color = SurfaceDark,
+                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(18.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Время просмотра", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        formatWatchTime(totalWatchedMs),
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text("Завершено серий", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        completedSeriesCount.toString(),
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Accent,
+                                    )
                                 }
                             }
                         }
@@ -902,13 +1394,82 @@ private fun HomeScreen(
                                 }
                             }
                         }
+
+                        item(key = "favorites-title") {
+                            Text(
+                                "Избранное",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(top = 18.dp),
+                            )
+                        }
+                        if (favorites.isEmpty()) {
+                            item(key = "favorites-empty") {
+                                Surface(
+                                    color = SurfaceDark,
+                                    shape = RoundedCornerShape(18.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        "Добавляйте фильмы и сериалы в избранное со страницы описания.",
+                                        color = TextDim,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        modifier = Modifier.padding(18.dp),
+                                    )
+                                }
+                            }
+                        } else {
+                            items(favorites, key = { "favorite:${it.path}" }) { favorite ->
+                                Surface(
+                                    onClick = { onOpen(favorite.path) },
+                                    color = SurfaceDark,
+                                    shape = RoundedCornerShape(18.dp),
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Row(
+                                        Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        AsyncImage(
+                                            model = favorite.poster,
+                                            contentDescription = null,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .size(width = 58.dp, height = 82.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(SurfaceHigher),
+                                        )
+                                        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                            Text(favorite.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                                            Text(
+                                                favorite.info,
+                                                color = TextDim,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 2,
+                                            )
+                                        }
+                                        Icon(Icons.Default.Favorite, contentDescription = "В избранном", tint = Accent)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
+
+            else -> SettingsScreen(
+                selectedTheme = themeVariant,
+                onThemeChange = onThemeChange,
+            )
         }
 
         NavigationBar(containerColor = SurfaceDark) {
-            val icons = listOf(Icons.Default.Home, Icons.Default.Movie, Icons.Default.Person)
+            val icons = listOf(
+                Icons.Default.Home,
+                Icons.Default.Movie,
+                Icons.Default.Person,
+                Icons.Default.Settings,
+            )
             destinationTitles.forEachIndexed { index, title ->
                 NavigationBarItem(
                     selected = selectedDestination == index,
@@ -921,6 +1482,87 @@ private fun HomeScreen(
                         indicatorColor = SurfaceHigher,
                     ),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    selectedTheme: FoxThemeVariant,
+    onThemeChange: (FoxThemeVariant) -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(20.dp)) {
+                Text(
+                    "Настройки",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Раздел готовится. Здесь появятся параметры FOXrezka.",
+                    color = TextDim,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("Оформление", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FoxThemeVariant.entries.forEach { variant ->
+                        FilterChip(
+                            selected = selectedTheme == variant,
+                            onClick = { onThemeChange(variant) },
+                            label = { Text(variant.title) },
+                        )
+                    }
+                }
+            }
+        }
+
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                Modifier.padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AsyncImage(
+                    model = R.drawable.foxrezka_logo,
+                    contentDescription = "FOXrezka",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(52.dp),
+                )
+                Column(Modifier.padding(start = 14.dp)) {
+                    Text("FOXrezka", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Версия ${BuildConfig.VERSION_NAME}",
+                        color = TextDim,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
     }
@@ -984,29 +1626,31 @@ private fun PosterCard(card: Card, onClick: () -> Unit) {
 @Composable
 private fun DetailScreen(
     detail: MovieDetail,
+    resumeItem: WatchedItem?,
+    isFavorite: Boolean,
     busy: Boolean,
     onBack: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onPlay: (String, String, String) -> Unit,
 ) {
     var translator by remember(detail.path) {
         mutableStateOf(
-            detail.defaultTranslator.ifBlank {
-                detail.translators.firstOrNull()?.id ?: ""
-            },
+            resumeItem?.translatorId?.takeIf { it.isNotBlank() }
+                ?: detail.defaultTranslator.ifBlank { detail.translators.firstOrNull()?.id ?: "" },
         )
     }
     var season by remember(detail.path) {
         mutableStateOf(
-            detail.defaultSeason.ifBlank {
-                detail.seasons.firstOrNull()?.id ?: ""
-            },
+            resumeItem?.seasonId?.takeIf { it.isNotBlank() }
+                ?: detail.defaultSeason.ifBlank { detail.seasons.firstOrNull()?.id ?: "" },
         )
     }
     var episode by remember(detail.path) {
         mutableStateOf(
-            detail.defaultEpisode.ifBlank {
-                detail.seasons.firstOrNull()?.episodes?.firstOrNull()?.episodeId ?: ""
-            },
+            resumeItem?.episodeId?.takeIf { it.isNotBlank() }
+                ?: detail.defaultEpisode.ifBlank {
+                    detail.seasons.firstOrNull()?.episodes?.firstOrNull()?.episodeId ?: ""
+                },
         )
     }
 
@@ -1021,14 +1665,18 @@ private fun DetailScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
             }
             Text(
-                detail.title,
+                "О фильме",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(12.dp))
+            IconButton(onClick = onToggleFavorite) {
+                Icon(
+                    if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = if (isFavorite) "Убрать из избранного" else "В избранное",
+                    tint = if (isFavorite) Accent else TextDim,
+                )
+            }
         }
 
         Column(
@@ -1039,7 +1687,7 @@ private fun DetailScreen(
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(230.dp),
+                    .height(340.dp),
             ) {
                 AsyncImage(
                     model = detail.poster,
@@ -1052,9 +1700,9 @@ private fun DetailScreen(
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                listOf(Color.Transparent, Bg),
-                                startY = 200f,
-                            )
+                                listOf(Color.Transparent, Bg.copy(alpha = 0.18f), Bg),
+                                startY = 120f,
+                            ),
                         ),
                 )
                 if (detail.rating.isNotBlank()) {
@@ -1069,33 +1717,53 @@ private fun DetailScreen(
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     )
                 }
+                Column(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 20.dp),
+                ) {
+                    Text(
+                        detail.title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (detail.originalTitle.isNotBlank()) {
+                        Text(
+                            detail.originalTitle,
+                            color = Color.White.copy(alpha = 0.76f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (detail.info.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            detail.info,
+                            color = Color.White.copy(alpha = 0.72f),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
 
             Column(Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    detail.title,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (detail.originalTitle.isNotBlank()) {
+                if (detail.description.isNotBlank()) {
+                    Spacer(Modifier.height(16.dp))
                     Text(
-                        detail.originalTitle,
-                        color = TextDim,
-                        style = MaterialTheme.typography.bodyMedium,
+                        "Описание",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
                     )
-                }
-                if (detail.info.isNotBlank()) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        detail.info,
-                        color = TextDim,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                if (detail.description.isNotBlank()) {
-                    Spacer(Modifier.height(14.dp))
-                    Text(
                         detail.description,
+                        color = TextDim,
                         style = MaterialTheme.typography.bodyMedium,
                         lineHeight = 21.sp,
                     )
@@ -1118,7 +1786,11 @@ private fun DetailScreen(
                                 shape = RoundedCornerShape(16.dp),
                                 border = androidx.compose.foundation.BorderStroke(
                                     width = 1.dp,
-                                    color = if (selected) Accent else SurfaceHigher,
+                                    color = when {
+                                        selected -> Accent
+                                        t.premium -> Color(0xFFFFC45B).copy(alpha = 0.72f)
+                                        else -> SurfaceHigher
+                                    },
                                 ),
                             ) {
                                 Column(
@@ -1135,11 +1807,16 @@ private fun DetailScreen(
                                     )
                                     Text(
                                         when {
-                                            t.premium -> "Premium"
+                                            t.premium && selected -> "✓ Выбрана · Premium"
+                                            t.premium -> "✦ Premium-озвучка"
                                             selected -> "Выбрана"
                                             else -> "Озвучка"
                                         },
-                                        color = if (selected) Accent else TextDim,
+                                        color = when {
+                                            selected -> Accent
+                                            t.premium -> Color(0xFFFFC45B)
+                                            else -> TextDim
+                                        },
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
