@@ -2,7 +2,7 @@
 
 <img src="android/app/src/main/res/drawable-nodpi/foxrezka_logo.png" alt="Логотип FOXrezka" width="160">
 
-# 🦊 FOXrezka
+#  FOXrezka
 
 ### Кино и сериалы — в одном Android-приложении
 
