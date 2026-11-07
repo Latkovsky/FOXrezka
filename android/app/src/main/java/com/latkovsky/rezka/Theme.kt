@@ -20,6 +20,22 @@ enum class FoxThemeVariant(val key: String, val title: String) {
     }
 }
 
+enum class PlayerColorTheme(
+    val key: String,
+    val title: String,
+    val accent: Color,
+) {
+    NEUTRAL("neutral", "Нейтральная", Color(0xFFE0E2E7)),
+    BLUE("blue", "Синяя", Color(0xFF64B5F6)),
+    GREEN("green", "Зелёная", Color(0xFF62F514)),
+    AMBER("amber", "Янтарная", Color(0xFFFFC45B));
+
+    companion object {
+        fun fromKey(key: String?): PlayerColorTheme =
+            entries.firstOrNull { it.key == key } ?: NEUTRAL
+    }
+}
+
 private data class Palette(
     val accent: Color,
     val accentSecondary: Color,

@@ -129,12 +129,29 @@ impl Client {
     }
 
     pub fn category_page(&self, kind: String, page: u32) -> Result<Vec<Card>, CoreError> {
+        let is_doramas = kind == "doramas";
+        if is_doramas {
+            let first_source_page = page.saturating_sub(1).saturating_mul(5) + 1;
+            let mut cards = Vec::new();
+            for source_page in first_source_page..first_source_page.saturating_add(5) {
+                let url = if source_page == 1 {
+                    format!("{}/series/", http::BASE)
+                } else {
+                    format!("{}/series/page/{source_page}/", http::BASE)
+                };
+                let page_cards = self.load_cards(&url)?;
+                if page_cards.is_empty() {
+                    break;
+                }
+                cards.extend(page_cards.into_iter().filter(catalog::is_dorama));
+            }
+            return Ok(cards);
+        }
         let section = match kind.as_str() {
             "films" => "films",
             "series" => "series",
             "cartoons" => "cartoons",
             "anime" => "animation",
-            "doramas" => "dramy",
             _ => "films",
         };
         let url = if page <= 1 {

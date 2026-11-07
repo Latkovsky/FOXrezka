@@ -35,6 +35,11 @@ pub struct MovieDetail {
     pub description: String,
     pub poster: String,
     pub info: String,
+    pub release_date: String,
+    pub genres: String,
+    pub runtime: String,
+    pub media_type: String,
+    pub episode_count: u32,
     pub rating: String,
     pub is_series: bool,
     pub translators: Vec<Translator>,
@@ -87,6 +92,9 @@ pub fn parse_detail(html: &str, path: &str) -> Result<MovieDetail, CoreError> {
         }
     }
     let info = info_parts.join(" • ");
+    let release_date = rows.get("Дата выхода").cloned().unwrap_or_default();
+    let genres = rows.get("Жанр").cloned().unwrap_or_default();
+    let runtime = rows.get("Время").cloned().unwrap_or_default();
 
     let rating = rows
         .get("Рейтинги")
@@ -193,6 +201,7 @@ pub fn parse_detail(html: &str, path: &str) -> Result<MovieDetail, CoreError> {
 
     let streams_raw = extract_streams_raw(html).unwrap_or_default();
     let is_series = !seasons.is_empty() || path.contains("/series/");
+    let episode_count = seasons.iter().map(|season| season.episodes.len() as u32).sum();
 
     Ok(MovieDetail {
         id,
@@ -202,6 +211,11 @@ pub fn parse_detail(html: &str, path: &str) -> Result<MovieDetail, CoreError> {
         description,
         poster,
         info,
+        release_date,
+        genres,
+        runtime,
+        media_type: if is_series { "Сериал" } else { "Фильм" }.to_string(),
+        episode_count,
         rating,
         is_series,
         translators,

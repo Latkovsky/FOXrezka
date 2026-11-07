@@ -31,6 +31,29 @@ pub fn parse_homepage_cards(html: &str) -> Vec<Card> {
     parse_cards_filtered(html, None)
 }
 
+pub fn is_dorama(card: &Card) -> bool {
+    if card.kind != "series" {
+        return false;
+    }
+    let info = card.info.to_lowercase();
+    [
+        "корея",
+        "япония",
+        "китай",
+        "тайвань",
+        "гонконг",
+        "таиланд",
+        "south korea",
+        "japan",
+        "china",
+        "taiwan",
+        "hong kong",
+        "thailand",
+    ]
+    .iter()
+    .any(|country| info.contains(country))
+}
+
 fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
     let doc = Html::parse_document(html);
     let item_sel = Selector::parse("div.b-content__inline_item").unwrap();
@@ -112,7 +135,7 @@ fn parse_cards_filtered(html: &str, kind_filter: Option<&str>) -> Vec<Card> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_homepage_cards;
+    use super::{is_dorama, parse_cards, parse_homepage_cards};
 
     #[test]
     fn homepage_cards_include_films_and_series_in_source_order() {
@@ -144,5 +167,32 @@ mod tests {
         assert_eq!(cards[1].kind, "series");
         assert_eq!(cards[2].kind, "anime");
         assert_eq!(cards[3].kind, "doramas");
+    }
+
+    #[test]
+    fn dorama_filter_keeps_asian_series_and_excludes_drama_films() {
+        let html = r#"
+            <div class="b-content__inline_item" data-id="1" data-url="/films/drama/">
+                <span class="cat films"></span>
+                <div class="b-content__inline_item-link"><a>Драма</a></div>
+                <div class="misc">2025, США, Драмы</div>
+            </div>
+            <div class="b-content__inline_item" data-id="2" data-url="/series/korean/">
+                <span class="cat series"></span>
+                <div class="b-content__inline_item-link"><a>Корейский сериал</a></div>
+                <div class="misc">2025, Южная Корея, Драмы</div>
+            </div>
+            <div class="b-content__inline_item" data-id="3" data-url="/series/japanese/">
+                <span class="cat series"></span>
+                <div class="b-content__inline_item-link"><a>Японский сериал</a></div>
+                <div class="misc">2025, Япония</div>
+            </div>
+        "#;
+        let cards = parse_cards(html);
+        let doramas: Vec<_> = cards.iter().filter(|card| is_dorama(card)).collect();
+
+        assert_eq!(doramas.len(), 2);
+        assert_eq!(doramas[0].title, "Корейский сериал");
+        assert_eq!(doramas[1].title, "Японский сериал");
     }
 }

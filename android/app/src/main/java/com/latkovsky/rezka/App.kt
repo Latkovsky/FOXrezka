@@ -1,6 +1,9 @@
 package com.latkovsky.rezka
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings as AndroidSettings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -14,6 +17,7 @@ import javax.crypto.spec.GCMParameterSpec
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -82,6 +86,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -90,10 +95,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -114,6 +126,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 object Core {
     val client: Client by lazy { Client() }
@@ -122,7 +137,6 @@ object Core {
 private const val PREFS = "rezka"
 private const val RECENT_KEY = "recently_watched"
 private const val HOME_CACHE_KEY = "homepage_series"
-private const val SEARCH_QUERY_KEY = "home_search_query"
 
 private sealed interface Screen {
     data object Home : Screen
@@ -160,11 +174,156 @@ private data class FavoriteItem(
     val info: String,
 )
 
+private enum class WatchStatus(val title: String) {
+    WATCHING("Смотрю"),
+    PLANNED("В планах"),
+    WATCHED("Просмотрено"),
+    DROPPED("Заброшено"),
+}
+
+private data class WatchListItem(
+    val path: String,
+    val title: String,
+    val poster: String,
+    val info: String,
+    val status: WatchStatus,
+)
+
 private const val FAVORITES_KEY = "favorites"
+private const val WATCH_LIST_KEY = "watch_list"
 private const val COMPLETED_SERIES_KEY = "completed_series_episodes"
 private const val THEME_KEY = "appearance_theme"
+private const val PLAYER_THEME_KEY = "player_color_theme"
 private const val ENCRYPTED_COOKIES_KEY = "cookies_encrypted"
 private const val SESSION_KEY_ALIAS = "foxrezka_session_key"
+
+private fun loadWatchList(prefs: android.content.SharedPreferences): List<WatchListItem> =
+    runCatching {
+        val items = JSONArray(prefs.getString(WATCH_LIST_KEY, "[]"))
+        buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val path = item.optString("path")
+                val status = WatchStatus.entries.firstOrNull {
+                    it.name == item.optString("status")
+                } ?: continue
+                if (path.isNotBlank()) {
+                    add(
+                        WatchListItem(
+                            path = path,
+                            title = item.optString("title"),
+                            poster = item.optString("poster"),
+                            info = item.optString("info"),
+                            status = status,
+                        ),
+                    )
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+private fun saveWatchList(
+    prefs: android.content.SharedPreferences,
+    items: List<WatchListItem>,
+) {
+    val json = JSONArray()
+    items.forEach { item ->
+        json.put(
+            JSONObject()
+                .put("path", item.path)
+                .put("title", item.title)
+                .put("poster", item.poster)
+                .put("info", item.info)
+                .put("status", item.status.name),
+        )
+    }
+    prefs.edit().putString(WATCH_LIST_KEY, json.toString()).apply()
+}
+
+private data class ReleaseUpdate(
+    val version: String,
+    val downloadUrl: String,
+    val fileName: String,
+)
+
+private fun compareVersionNames(left: String, right: String): Int {
+    val leftParts = Regex("\\d+").findAll(left).map { it.value.toInt() }.toList()
+    val rightParts = Regex("\\d+").findAll(right).map { it.value.toInt() }.toList()
+    for (index in 0 until maxOf(leftParts.size, rightParts.size)) {
+        val comparison = (leftParts.getOrElse(index) { 0 }).compareTo(rightParts.getOrElse(index) { 0 })
+        if (comparison != 0) return comparison
+    }
+    return 0
+}
+
+private fun fetchLatestUpdate(currentVersion: String): ReleaseUpdate? {
+    val connection = URL("https://api.github.com/repos/Latkovsky/FOXrezka/releases/latest")
+        .openConnection() as HttpURLConnection
+    connection.requestMethod = "GET"
+    connection.connectTimeout = 15_000
+    connection.readTimeout = 15_000
+    connection.setRequestProperty("Accept", "application/vnd.github+json")
+    connection.setRequestProperty("User-Agent", "FOXrezka-Android")
+    try {
+        check(connection.responseCode in 200..299) {
+            "GitHub ответил кодом ${connection.responseCode}"
+        }
+        val release = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        val version = release.optString("tag_name").removePrefix("v")
+        if (version.isBlank() || compareVersionNames(version, currentVersion) <= 0) return null
+        val assets = release.optJSONArray("assets") ?: return null
+        for (index in 0 until assets.length()) {
+            val asset = assets.optJSONObject(index) ?: continue
+            val name = asset.optString("name")
+            val downloadUrl = asset.optString("browser_download_url")
+            val uri = runCatching { Uri.parse(downloadUrl) }.getOrNull()
+            if (name.endsWith(".apk", ignoreCase = true) &&
+                uri?.scheme == "https" && uri.host == "github.com"
+            ) {
+                return ReleaseUpdate(version, downloadUrl, name)
+            }
+        }
+        error("В последнем релизе GitHub не найден APK")
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun downloadUpdate(context: Context, update: ReleaseUpdate): File {
+    val directory = File(context.cacheDir, "updates")
+    check(directory.exists() || directory.mkdirs()) { "Не удалось создать каталог обновления" }
+    val fileName = update.fileName.substringAfterLast('/').substringAfterLast('\\')
+    val apk = File(directory, fileName)
+    val connection = URL(update.downloadUrl).openConnection() as HttpURLConnection
+    connection.connectTimeout = 20_000
+    connection.readTimeout = 30_000
+    connection.instanceFollowRedirects = true
+    connection.setRequestProperty("User-Agent", "FOXrezka-Android")
+    try {
+        check(connection.responseCode in 200..299) {
+            "Не удалось скачать APK: HTTP ${connection.responseCode}"
+        }
+        connection.inputStream.use { input ->
+            apk.outputStream().buffered().use { output -> input.copyTo(output) }
+        }
+        check(apk.length() > 0) { "Скачанный APK пустой" }
+        return apk
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun installUpdate(context: Context, apk: File) {
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        apk,
+    )
+    val intent = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(uri, "application/vnd.android.package-archive")
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+}
 
 private fun sessionKey(): SecretKey {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -368,12 +527,16 @@ fun App() {
     var email by remember { mutableStateOf("") }
     var recent by remember { mutableStateOf(loadRecent(prefs)) }
     var favorites by remember { mutableStateOf(loadFavorites(prefs)) }
+    var watchItems by remember { mutableStateOf(loadWatchList(prefs)) }
     var cachedHome by remember { mutableStateOf(loadCachedHomepage(prefs)) }
     var completedSeriesEpisodes by remember {
         mutableStateOf(prefs.getStringSet(COMPLETED_SERIES_KEY, emptySet()).orEmpty().toSet())
     }
     var selectedTheme by remember {
         mutableStateOf(FoxThemeVariant.fromKey(prefs.getString(THEME_KEY, "green")))
+    }
+    var selectedPlayerTheme by remember {
+        mutableStateOf(PlayerColorTheme.fromKey(prefs.getString(PLAYER_THEME_KEY, "neutral")))
     }
     var selectedDestination by rememberSaveable { mutableIntStateOf(0) }
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
@@ -437,6 +600,18 @@ fun App() {
         }
     }
 
+    fun setWatchStatus(detail: MovieDetail, status: WatchStatus) {
+        val item = WatchListItem(
+            path = detail.path,
+            title = detail.title,
+            poster = detail.poster,
+            info = detail.info,
+            status = status,
+        )
+        watchItems = listOf(item) + watchItems.filterNot { it.path == detail.path }
+        saveWatchList(prefs, watchItems)
+    }
+
     fun startPlayback(
         detail: MovieDetail,
         translatorId: String,
@@ -455,6 +630,9 @@ fun App() {
             busy = false
             result
                 .onSuccess { streams ->
+                    if (watchItems.none { it.path == detail.path }) {
+                        setWatchStatus(detail, WatchStatus.WATCHING)
+                    }
                     val best = streams.qualities.firstOrNull()
                     if (best == null) {
                         error = "Не удалось найти видео"
@@ -529,6 +707,21 @@ fun App() {
                         email = email,
                         recent = recent,
                         favorites = favorites,
+                        watchItems = watchItems,
+                        playerTheme = selectedPlayerTheme,
+                        onPlayerThemeChange = { playerTheme ->
+                            selectedPlayerTheme = playerTheme
+                            prefs.edit().putString(PLAYER_THEME_KEY, playerTheme.key).apply()
+                        },
+                        onWatchStatusChange = { path, status ->
+                            val item = watchItems.firstOrNull { it.path == path }
+                            if (item != null) {
+                                watchItems = watchItems.map {
+                                    if (it.path == path) it.copy(status = status) else it
+                                }
+                                saveWatchList(prefs, watchItems)
+                            }
+                        },
                         themeVariant = selectedTheme,
                         onThemeChange = { variant ->
                             selectedTheme = variant
@@ -553,6 +746,7 @@ fun App() {
                     is Screen.Detail -> DetailScreen(
                         detail = current.detail,
                         resumeItem = current.resumeItem,
+                        watchStatus = watchItems.firstOrNull { it.path == current.detail.path }?.status,
                         isFavorite = favorites.any { it.path == current.detail.path },
                         busy = busy,
                         onBack = { screen = Screen.Home },
@@ -573,6 +767,7 @@ fun App() {
                             }
                             saveFavorites(prefs, favorites)
                         },
+                        onWatchStatusChange = { status -> setWatchStatus(current.detail, status) },
                         onPlay = { translatorId, seasonId, episodeId ->
                             startPlayback(current.detail, translatorId, seasonId, episodeId)
                         },
@@ -583,8 +778,9 @@ fun App() {
                         key(args.resumeKey, args.startMs, args.streams.qualities.firstOrNull()?.url) {
                             PlayerScreen(
                                 qualities = args.streams.qualities,
-                                translators = args.detail.translators,
+                                translators = args.detail.translators.filterNot { it.premium },
                                 selectedTranslatorId = args.translatorId,
+                                playerTheme = selectedPlayerTheme,
                                 episodes = args.detail.seasons
                                     .firstOrNull { it.id == args.seasonId }
                                     ?.episodes
@@ -815,6 +1011,10 @@ private fun HomeScreen(
     email: String,
     recent: List<WatchedItem>,
     favorites: List<FavoriteItem>,
+    watchItems: List<WatchListItem>,
+    playerTheme: PlayerColorTheme,
+    onPlayerThemeChange: (PlayerColorTheme) -> Unit,
+    onWatchStatusChange: (String, WatchStatus) -> Unit,
     themeVariant: FoxThemeVariant,
     onThemeChange: (FoxThemeVariant) -> Unit,
     cachedHome: List<Card>,
@@ -827,10 +1027,15 @@ private fun HomeScreen(
     onOpen: (String) -> Unit,
 ) {
     var category by rememberSaveable { mutableIntStateOf(0) }
-    var query by rememberSaveable {
-        mutableStateOf(prefs.getString(SEARCH_QUERY_KEY, "").orEmpty())
-    }
+    var homeQuery by remember { mutableStateOf("") }
+    var catalogQuery by remember { mutableStateOf("") }
     var showRecentHistory by rememberSaveable { mutableStateOf(false) }
+    var selectedWatchStatusName by rememberSaveable {
+        mutableStateOf(WatchStatus.WATCHING.name)
+    }
+    val statusTabBounds = remember { mutableStateMapOf<WatchStatus, Rect>() }
+    var draggedWatchPath by remember { mutableStateOf<String?>(null) }
+    var dragPosition by remember { mutableStateOf<Offset?>(null) }
     var homeCards by remember { mutableStateOf(cachedHome) }
     var catalogCards by remember { mutableStateOf<List<Card>>(emptyList()) }
     var homeLoading by remember { mutableStateOf(cachedHome.isEmpty()) }
@@ -864,10 +1069,6 @@ private fun HomeScreen(
         showRecentHistory = false
     }
 
-    LaunchedEffect(query) {
-        prefs.edit().putString(SEARCH_QUERY_KEY, query).apply()
-    }
-
     LaunchedEffect(homeRefresh) {
         homeLoading = homeCards.isEmpty()
         homeHasMore = false
@@ -898,9 +1099,9 @@ private fun HomeScreen(
         homeMoreError,
         homePage,
         homeRetry,
-        query,
+        homeQuery,
     ) {
-        if (selectedDestination != 0 || query.isNotBlank() || !homeHasMore ||
+        if (selectedDestination != 0 || homeQuery.isNotBlank() || !homeHasMore ||
             homeLoading || homeLoadingMore || homeMoreError
         ) {
             return@LaunchedEffect
@@ -931,11 +1132,9 @@ private fun HomeScreen(
             }
     }
 
-    LaunchedEffect(selectedDestination, category, query, catalogRefresh) {
-        if (selectedDestination != 1 && !(selectedDestination == 0 && query.isNotBlank())) {
-            return@LaunchedEffect
-        }
-        if (query.isNotBlank()) delay(500)
+    LaunchedEffect(selectedDestination, category, catalogQuery, catalogRefresh) {
+        if (selectedDestination != 1) return@LaunchedEffect
+        if (catalogQuery.isNotBlank()) delay(500)
         catalogLoading = true
         catalogHasMore = false
         catalogMoreError = false
@@ -943,13 +1142,13 @@ private fun HomeScreen(
         catalogError = null
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                if (query.isBlank()) Core.client.categoryPage(kinds[category], 1u)
-                else Core.client.searchPage(query, 1u)
+                if (catalogQuery.isBlank()) Core.client.categoryPage(kinds[category], 1u)
+                else Core.client.searchPage(catalogQuery, 1u)
             }
         }
         result
             .onSuccess { page ->
-                catalogCards = matchingSearchCards(page, query)
+                catalogCards = matchingSearchCards(page, catalogQuery)
                 catalogHasMore = page.isNotEmpty()
             }
             .onFailure {
@@ -962,7 +1161,7 @@ private fun HomeScreen(
     LaunchedEffect(
         selectedDestination,
         category,
-        query,
+        catalogQuery,
         catalogCards.size,
         catalogHasMore,
         catalogLoading,
@@ -970,14 +1169,12 @@ private fun HomeScreen(
         catalogPage,
         catalogRetry,
     ) {
-        if ((selectedDestination != 1 && !(selectedDestination == 0 && query.isNotBlank())) ||
-            catalogLoading || catalogLoadingMore ||
+        if (selectedDestination != 1 || catalogLoading || catalogLoadingMore ||
             !catalogHasMore || catalogMoreError || catalogCards.isEmpty()
         ) {
             return@LaunchedEffect
         }
-        val searchGridState = if (selectedDestination == 0) homeGridState else catalogGridState
-        snapshotFlow { searchGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+        snapshotFlow { catalogGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
             .distinctUntilChanged()
             .collectLatest { lastVisible ->
                 if (lastVisible >= catalogCards.size - 5) {
@@ -985,13 +1182,13 @@ private fun HomeScreen(
                     val page = catalogPage
                     val result = withContext(Dispatchers.IO) {
                         runCatching {
-                            if (query.isBlank()) Core.client.categoryPage(kinds[category], page.toUInt())
-                            else Core.client.searchPage(query, page.toUInt())
+                            if (catalogQuery.isBlank()) Core.client.categoryPage(kinds[category], page.toUInt())
+                            else Core.client.searchPage(catalogQuery, page.toUInt())
                         }
                     }
                     result
                         .onSuccess { rawNext ->
-                            val next = matchingSearchCards(rawNext, query)
+                            val next = matchingSearchCards(rawNext, catalogQuery)
                             val merged = (catalogCards + next).distinctBy { it.path }
                             catalogHasMore = rawNext.isNotEmpty() && merged.size > catalogCards.size
                             if (merged.size > catalogCards.size) {
@@ -1024,14 +1221,14 @@ private fun HomeScreen(
 
         if (selectedDestination == 0) {
             OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
+                value = homeQuery,
+                onValueChange = { homeQuery = it },
                 placeholder = { Text("Поиск фильмов и сериалов") },
                 singleLine = true,
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { query = "" }) {
+                    if (homeQuery.isNotEmpty()) {
+                        IconButton(onClick = { homeQuery = "" }) {
                             Icon(Icons.Default.Close, contentDescription = "Очистить")
                         }
                     }
@@ -1046,87 +1243,12 @@ private fun HomeScreen(
         when (selectedDestination) {
             0 -> {
                 Text(
-                    if (query.isBlank()) "Подборка с Rezka" else "Результаты поиска",
+                    if (homeQuery.isBlank()) "Подборка" else "Результаты поиска",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
                 )
-                if (query.isBlank()) {
-                    Text(
-                        "Актуальная подборка с главной страницы сайта",
-                        color = TextDim,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
-                    )
-                }
-                if (query.isBlank() && recent.isNotEmpty()) {
-                    Text(
-                        "Продолжить просмотр",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 18.dp, bottom = 8.dp),
-                    )
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.padding(bottom = 14.dp),
-                    ) {
-                        items(recent.take(10), key = { "continue:${it.path}" }) { watched ->
-                            Surface(
-                                onClick = { onContinue(watched) },
-                                color = SurfaceDark,
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.width(260.dp),
-                            ) {
-                                Row(
-                                    Modifier.padding(9.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    AsyncImage(
-                                        model = watched.poster,
-                                        contentDescription = null,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(width = 54.dp, height = 76.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(SurfaceHigher),
-                                    )
-                                    Column(Modifier.padding(start = 10.dp).weight(1f)) {
-                                        Text(
-                                            watched.title,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        Text(
-                                            watched.subtitle.ifBlank { "Продолжить" },
-                                            color = TextDim,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        if (watched.positionMs > 0) {
-                                            val duration = prefs.getLong(
-                                                "duration:${watched.path}|${watched.translatorId}|${watched.seasonId}|${watched.episodeId}",
-                                                0L,
-                                            )
-                                            if (duration > 0) {
-                                                androidx.compose.material3.LinearProgressIndicator(
-                                                    progress = { (watched.positionMs.toFloat() / duration).coerceIn(0f, 1f) },
-                                                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                                                    color = Accent,
-                                                    trackColor = SurfaceHigher,
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Icon(Icons.Default.PlayArrow, contentDescription = "Продолжить", tint = Accent)
-                                }
-                            }
-                        }
-                    }
-                }
-                if (query.isBlank() && homeError != null && homeCards.isNotEmpty()) {
+                if (homeQuery.isBlank() && homeError != null && homeCards.isNotEmpty()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 18.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1142,37 +1264,6 @@ private fun HomeScreen(
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     when {
-                        query.isNotBlank() && catalogLoading -> CircularProgressIndicator(
-                            color = Accent,
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-
-                        query.isNotBlank() && catalogError != null -> Column(
-                            Modifier.align(Alignment.Center).padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(catalogError.orEmpty(), color = TextDim)
-                            TextButton(onClick = { catalogRefresh++ }) { Text("Повторить") }
-                        }
-
-                        query.isNotBlank() && catalogCards.isEmpty() -> Text(
-                            if (catalogLoading) "Загрузка…" else "Ничего не найдено",
-                            color = TextDim,
-                            modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                        )
-
-                        query.isNotBlank() -> LazyVerticalGrid(
-                            state = homeGridState,
-                            columns = GridCells.Adaptive(minSize = 108.dp),
-                            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                        ) {
-                            items(catalogCards, key = { it.path }) { card ->
-                                PosterCard(card = card, onClick = { onOpen(card.path) })
-                            }
-                        }
-
                         homeLoading && homeCards.isEmpty() -> CircularProgressIndicator(
                             color = Accent,
                             modifier = Modifier.align(Alignment.Center),
@@ -1204,33 +1295,17 @@ private fun HomeScreen(
                             }
                         }
                     }
-                    if (query.isBlank() && homeLoadingMore) {
+                    if (homeLoadingMore) {
                         CircularProgressIndicator(
                             color = Accent,
                             modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
                             strokeWidth = 3.dp,
                         )
-                    } else if (query.isBlank() && homeMoreError) {
+                    } else if (homeMoreError) {
                         TextButton(
                             onClick = {
                                 homeMoreError = false
                                 homeRetry++
-                            },
-                            modifier = Modifier.align(Alignment.BottomCenter),
-                        ) {
-                            Text("Не удалось загрузить. Повторить")
-                        }
-                    } else if (query.isNotBlank() && catalogLoadingMore) {
-                        CircularProgressIndicator(
-                            color = Accent,
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp).size(28.dp),
-                            strokeWidth = 3.dp,
-                        )
-                    } else if (query.isNotBlank() && catalogMoreError) {
-                        TextButton(
-                            onClick = {
-                                catalogMoreError = false
-                                catalogRetry++
                             },
                             modifier = Modifier.align(Alignment.BottomCenter),
                         ) {
@@ -1241,6 +1316,28 @@ private fun HomeScreen(
             }
 
             1 -> {
+                Text(
+                    "Каталог",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 18.dp, top = 8.dp, bottom = 4.dp),
+                )
+                OutlinedTextField(
+                    value = catalogQuery,
+                    onValueChange = { catalogQuery = it },
+                    placeholder = { Text("Поиск в каталоге") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (catalogQuery.isNotEmpty()) {
+                            IconButton(onClick = { catalogQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Очистить")
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                )
                 ScrollableTabRow(
                     selectedTabIndex = category,
                     containerColor = Color.Transparent,
@@ -1250,7 +1347,10 @@ private fun HomeScreen(
                     categoryTitles.forEachIndexed { index, title ->
                         Tab(
                             selected = category == index,
-                            onClick = { category = index },
+                            onClick = {
+                                category = index
+                                catalogQuery = ""
+                            },
                             text = {
                                 Text(
                                     title,
@@ -1282,7 +1382,7 @@ private fun HomeScreen(
                         }
 
                         catalogCards.isEmpty() -> Text(
-                            if (query.isBlank()) "Пока ничего нет" else "Ничего не найдено",
+                            if (catalogQuery.isBlank()) "Пока ничего нет" else "Ничего не найдено",
                             color = TextDim,
                             modifier = Modifier.align(Alignment.Center),
                         )
@@ -1425,6 +1525,16 @@ private fun HomeScreen(
                         }
                     }
 
+                    if (recent.any { it.positionMs > 0 }) {
+                        item(key = "continue-watching") {
+                            ContinueWatchingSection(
+                                recent = recent,
+                                prefs = prefs,
+                                onContinue = onContinue,
+                            )
+                        }
+                    }
+
                     item(key = "recent-entry") {
                         Surface(
                             onClick = { showRecentHistory = true },
@@ -1445,6 +1555,121 @@ private fun HomeScreen(
                                     )
                                 }
                                 Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+
+                    item(key = "watch-list-title") {
+                        Text(
+                            "Мои списки",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                    item(key = "watch-list-tabs") {
+                        ScrollableTabRow(
+                            selectedTabIndex = WatchStatus.entries.indexOfFirst {
+                                it.name == selectedWatchStatusName
+                            }.coerceAtLeast(0),
+                            containerColor = Color.Transparent,
+                            contentColor = Accent,
+                            edgePadding = 0.dp,
+                        ) {
+                            WatchStatus.entries.forEach { status ->
+                                val count = watchItems.count { it.status == status }
+                                Tab(
+                                    selected = selectedWatchStatusName == status.name,
+                                    onClick = { selectedWatchStatusName = status.name },
+                                    modifier = Modifier.onGloballyPositioned {
+                                        statusTabBounds[status] = it.boundsInRoot()
+                                    },
+                                    text = {
+                                        Text("${status.title} ($count)", maxLines = 1)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    val selectedWatchStatus = WatchStatus.entries.first {
+                        it.name == selectedWatchStatusName
+                    }
+                    val statusItems = watchItems.filter { it.status == selectedWatchStatus }
+                    if (statusItems.isEmpty()) {
+                        item(key = "watch-list-empty") {
+                            Text(
+                                "Здесь появятся выбранные фильмы и сериалы. Удерживайте карточку и перетащите её на другой статус.",
+                                color = TextDim,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(vertical = 8.dp),
+                            )
+                        }
+                    } else {
+                        items(statusItems, key = { "watch:${it.path}" }) { item ->
+                            var itemCoordinates by remember(item.path) {
+                                mutableStateOf<LayoutCoordinates?>(null)
+                            }
+                            Surface(
+                                onClick = { onOpen(item.path) },
+                                color = if (draggedWatchPath == item.path) SurfaceHigher else SurfaceDark,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { itemCoordinates = it }
+                                    .pointerInput(item.path) {
+                                        detectDragGesturesAfterLongPress(
+                                            onDragStart = { local ->
+                                                draggedWatchPath = item.path
+                                                dragPosition = itemCoordinates?.localToRoot(local)
+                                            },
+                                            onDrag = { change, _ ->
+                                                dragPosition = itemCoordinates?.localToRoot(change.position)
+                                                change.consume()
+                                            },
+                                            onDragEnd = {
+                                                val target = dragPosition?.let { position ->
+                                                    WatchStatus.entries.firstOrNull { status ->
+                                                        statusTabBounds[status]?.contains(position) == true
+                                                    }
+                                                }
+                                                if (target != null && target != item.status) {
+                                                    onWatchStatusChange(item.path, target)
+                                                    selectedWatchStatusName = target.name
+                                                }
+                                                draggedWatchPath = null
+                                                dragPosition = null
+                                            },
+                                            onDragCancel = {
+                                                draggedWatchPath = null
+                                                dragPosition = null
+                                            },
+                                        )
+                                    },
+                            ) {
+                                Row(
+                                    Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AsyncImage(
+                                        model = item.poster,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(width = 48.dp, height = 68.dp)
+                                            .clip(RoundedCornerShape(9.dp))
+                                            .background(SurfaceHigher),
+                                    )
+                                    Column(Modifier.padding(start = 11.dp).weight(1f)) {
+                                        Text(item.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                                        Text(
+                                            item.info,
+                                            color = TextDim,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 2,
+                                        )
+                                    }
+                                    Text("Перетащить", color = TextDim, style = MaterialTheme.typography.labelSmall)
+                                }
                             }
                         }
                     }
@@ -1508,6 +1733,8 @@ private fun HomeScreen(
             else -> SettingsScreen(
                 selectedTheme = themeVariant,
                 onThemeChange = onThemeChange,
+                playerTheme = playerTheme,
+                onPlayerThemeChange = onPlayerThemeChange,
                 onLogout = onLogout,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
@@ -1538,13 +1765,94 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun ContinueWatchingSection(
+    recent: List<WatchedItem>,
+    prefs: android.content.SharedPreferences,
+    onContinue: (WatchedItem) -> Unit,
+) {
+    val items = recent.filter { it.positionMs > 0 }.take(10)
+    if (items.isEmpty()) return
+
+    Column {
+        Text(
+            "Продолжить просмотр",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(items, key = { "continue:${it.path}" }) { watched ->
+                Surface(
+                    onClick = { onContinue(watched) },
+                    color = SurfaceDark,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.width(260.dp),
+                ) {
+                    Row(
+                        Modifier.padding(9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AsyncImage(
+                            model = watched.poster,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(width = 54.dp, height = 76.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SurfaceHigher),
+                        )
+                        Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                            Text(
+                                watched.title,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                watched.subtitle.ifBlank { "Продолжить" },
+                                color = TextDim,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val duration = prefs.getLong(
+                                "duration:${watched.path}|${watched.translatorId}|${watched.seasonId}|${watched.episodeId}",
+                                0L,
+                            )
+                            if (duration > 0) {
+                                androidx.compose.material3.LinearProgressIndicator(
+                                    progress = {
+                                        (watched.positionMs.toFloat() / duration).coerceIn(0f, 1f)
+                                    },
+                                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                                    color = Accent,
+                                    trackColor = SurfaceHigher,
+                                )
+                            }
+                        }
+                        Icon(Icons.Default.PlayArrow, contentDescription = "Продолжить", tint = Accent)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsScreen(
     selectedTheme: FoxThemeVariant,
     onThemeChange: (FoxThemeVariant) -> Unit,
+    playerTheme: PlayerColorTheme,
+    onPlayerThemeChange: (PlayerColorTheme) -> Unit,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showLogoutConfirmation by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
+    var pendingApk by remember { mutableStateOf<File?>(null) }
 
     Column(
         modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -1573,6 +1881,144 @@ private fun SettingsScreen(
                                 selectedContainerColor = Accent,
                                 selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
                             ),
+                        )
+                    }
+                }
+            }
+        }
+
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                Modifier.fillMaxWidth().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = {
+                        checkingUpdate = true
+                        updateMessage = "Проверяю GitHub Releases…"
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching { fetchLatestUpdate(BuildConfig.VERSION_NAME) }
+                            }
+                            result.onSuccess { update ->
+                                if (update == null) {
+                                    updateMessage = "Установлена последняя версия."
+                                    pendingApk = null
+                                    checkingUpdate = false
+                                } else {
+                                    updateMessage = "Доступно обновление ${update.version}. Скачиваю APK…"
+                                    val download = withContext(Dispatchers.IO) {
+                                        runCatching { downloadUpdate(context, update) }
+                                    }
+                                    download.onSuccess { apk ->
+                                        pendingApk = apk
+                                        if (context.packageManager.canRequestPackageInstalls()) {
+                                            runCatching { installUpdate(context, apk) }
+                                                .onSuccess {
+                                                    updateMessage = "Подтвердите установку в системном окне."
+                                                }
+                                                .onFailure {
+                                                    updateMessage = "Не удалось открыть установщик: ${it.message}"
+                                                }
+                                        } else {
+                                            updateMessage = "APK скачан. Разрешите установку из этого источника, затем нажмите «Установить обновление»."
+                                            context.startActivity(
+                                                Intent(
+                                                    AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                    Uri.parse("package:${context.packageName}"),
+                                                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                            )
+                                        }
+                                        checkingUpdate = false
+                                    }.onFailure {
+                                        updateMessage = "Не удалось скачать обновление: ${it.message}"
+                                        checkingUpdate = false
+                                    }
+                                }
+                            }.onFailure {
+                                updateMessage = "Не удалось проверить обновления: ${it.message}"
+                                checkingUpdate = false
+                            }
+                        }
+                    },
+                    enabled = !checkingUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (checkingUpdate) "Проверка…" else "Проверить автообновление")
+                }
+                pendingApk?.let { apk ->
+                    TextButton(
+                        onClick = {
+                            if (context.packageManager.canRequestPackageInstalls()) {
+                                runCatching { installUpdate(context, apk) }
+                                    .onFailure {
+                                        updateMessage = "Не удалось открыть установщик: ${it.message}"
+                                    }
+                            } else {
+                                context.startActivity(
+                                    Intent(
+                                        AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:${context.packageName}"),
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Установить обновление")
+                    }
+                }
+                updateMessage?.let { Text(it, color = TextDim, style = MaterialTheme.typography.bodySmall) }
+                TextButton(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Latkovsky/FOXrezka"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }.onFailure {
+                            updateMessage = "Не удалось открыть GitHub: ${it.message}"
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Репозиторий FOXrezka на GitHub")
+                }
+            }
+        }
+
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    "Цвет плеера",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+                ScrollableTabRow(
+                    selectedTabIndex = PlayerColorTheme.entries.indexOf(playerTheme),
+                    containerColor = Color.Transparent,
+                    contentColor = Accent,
+                    edgePadding = 12.dp,
+                ) {
+                    PlayerColorTheme.entries.forEach { variant ->
+                        Tab(
+                            selected = playerTheme == variant,
+                            onClick = { onPlayerThemeChange(variant) },
+                            text = {
+                                Text(
+                                    variant.title,
+                                    color = if (playerTheme == variant) variant.accent else TextDim,
+                                )
+                            },
                         )
                     }
                 }
@@ -1690,16 +2136,22 @@ private fun PosterCard(card: Card, onClick: () -> Unit) {
 private fun DetailScreen(
     detail: MovieDetail,
     resumeItem: WatchedItem?,
+    watchStatus: WatchStatus?,
     isFavorite: Boolean,
     busy: Boolean,
     onBack: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onWatchStatusChange: (WatchStatus) -> Unit,
     onPlay: (String, String, String) -> Unit,
 ) {
+    val availableTranslators = remember(detail.path) {
+        detail.translators.filterNot { it.premium }
+    }
     var translator by remember(detail.path) {
         mutableStateOf(
-            resumeItem?.translatorId?.takeIf { it.isNotBlank() }
-                ?: detail.defaultTranslator.ifBlank { detail.translators.firstOrNull()?.id ?: "" },
+            resumeItem?.translatorId?.takeIf { id -> availableTranslators.any { it.id == id } }
+                ?: detail.defaultTranslator.takeIf { id -> availableTranslators.any { it.id == id } }
+                ?: availableTranslators.firstOrNull()?.id.orEmpty(),
         )
     }
     var season by remember(detail.path) {
@@ -1747,50 +2199,27 @@ private fun DetailScreen(
                 .weight(1f)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(340.dp),
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalAlignment = Alignment.Top,
             ) {
                 AsyncImage(
                     model = detail.poster,
                     contentDescription = detail.title,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .width(124.dp)
+                        .height(186.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(SurfaceHigher),
                 )
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(Color.Transparent, Bg.copy(alpha = 0.18f), Bg),
-                                startY = 120f,
-                            ),
-                        ),
-                )
-                if (detail.rating.isNotBlank()) {
-                    Text(
-                        "★ ${detail.rating}",
-                        color = Color(0xFFFFC94D),
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp)
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
-                }
-                Column(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 20.dp),
-                ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text(
                         detail.title,
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 3,
+                        maxLines = 4,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (detail.originalTitle.isNotBlank()) {
@@ -1802,20 +2231,51 @@ private fun DetailScreen(
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    if (detail.info.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
+                    Text("Тип: ${detail.mediaType}", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                    if (detail.releaseDate.isNotBlank()) {
+                        Text("Дата выхода: ${detail.releaseDate}", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (detail.genres.isNotBlank()) {
                         Text(
-                            detail.info,
-                            color = Color.White.copy(alpha = 0.72f),
+                            "Жанр: ${detail.genres}",
+                            color = TextDim,
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2,
+                            maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                    if (detail.isSeries && detail.episodeCount > 0u) {
+                        Text("Серий: ${detail.episodeCount}", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (detail.runtime.isNotBlank()) {
+                        Text("Длительность: ${detail.runtime}", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (detail.rating.isNotBlank()) {
+                        Text("★ ${detail.rating}", color = Color(0xFFFFC94D), fontWeight = FontWeight.Bold)
                     }
                 }
             }
 
             Column(Modifier.padding(horizontal = 16.dp)) {
+                Text(
+                    "Статус просмотра",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(8.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    WatchStatus.entries.forEach { status ->
+                        FilterChip(
+                            selected = watchStatus == status,
+                            onClick = { onWatchStatusChange(status) },
+                            label = { Text(status.title) },
+                        )
+                    }
+                }
+
                 if (detail.description.isNotBlank()) {
                     Spacer(Modifier.height(16.dp))
                     Text(
@@ -1832,7 +2292,7 @@ private fun DetailScreen(
                     )
                 }
 
-                if (detail.translators.isNotEmpty()) {
+                if (availableTranslators.isNotEmpty()) {
                     Spacer(Modifier.height(18.dp))
                     Text(
                         "Озвучка",
@@ -1841,7 +2301,7 @@ private fun DetailScreen(
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(detail.translators, key = { it.id }) { t ->
+                        items(availableTranslators, key = { it.id }) { t ->
                             val selected = translator == t.id
                             Surface(
                                 onClick = { translator = t.id },

@@ -1717,6 +1717,11 @@ data class MovieDetail (
     var `description`: kotlin.String, 
     var `poster`: kotlin.String, 
     var `info`: kotlin.String, 
+    var `releaseDate`: kotlin.String,
+    var `genres`: kotlin.String,
+    var `runtime`: kotlin.String,
+    var `mediaType`: kotlin.String,
+    var `episodeCount`: kotlin.UInt,
     var `rating`: kotlin.String, 
     var `isSeries`: kotlin.Boolean, 
     var `translators`: List<Translator>, 
@@ -1745,6 +1750,11 @@ public object FfiConverterTypeMovieDetail: FfiConverterRustBuffer<MovieDetail> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterSequenceTypeTranslator.read(buf),
             FfiConverterSequenceTypeSeason.read(buf),
@@ -1764,6 +1774,11 @@ public object FfiConverterTypeMovieDetail: FfiConverterRustBuffer<MovieDetail> {
             FfiConverterString.allocationSize(value.`description`) +
             FfiConverterString.allocationSize(value.`poster`) +
             FfiConverterString.allocationSize(value.`info`) +
+            FfiConverterString.allocationSize(value.`releaseDate`) +
+            FfiConverterString.allocationSize(value.`genres`) +
+            FfiConverterString.allocationSize(value.`runtime`) +
+            FfiConverterString.allocationSize(value.`mediaType`) +
+            FfiConverterUInt.allocationSize(value.`episodeCount`) +
             FfiConverterString.allocationSize(value.`rating`) +
             FfiConverterBoolean.allocationSize(value.`isSeries`) +
             FfiConverterSequenceTypeTranslator.allocationSize(value.`translators`) +
@@ -1783,6 +1798,11 @@ public object FfiConverterTypeMovieDetail: FfiConverterRustBuffer<MovieDetail> {
             FfiConverterString.write(value.`description`, buf)
             FfiConverterString.write(value.`poster`, buf)
             FfiConverterString.write(value.`info`, buf)
+            FfiConverterString.write(value.`releaseDate`, buf)
+            FfiConverterString.write(value.`genres`, buf)
+            FfiConverterString.write(value.`runtime`, buf)
+            FfiConverterString.write(value.`mediaType`, buf)
+            FfiConverterUInt.write(value.`episodeCount`, buf)
             FfiConverterString.write(value.`rating`, buf)
             FfiConverterBoolean.write(value.`isSeries`, buf)
             FfiConverterSequenceTypeTranslator.write(value.`translators`, buf)
@@ -2211,4 +2231,3 @@ public object FfiConverterSequenceTypeTranslator: FfiConverterRustBuffer<List<Tr
         }
     }
 }
-
