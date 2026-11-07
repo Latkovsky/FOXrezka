@@ -6,12 +6,12 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-val Accent = Color(0xFFC82DDE)
-val AccentTeal = Color(0xFF3A92A6)
-val Bg = Color(0xFF0B0B10)
-val SurfaceDark = Color(0xFF15151D)
-val SurfaceHigher = Color(0xFF1F1F2A)
-val TextDim = Color(0xFF9AA0AE)
+val Accent = Color(0xFFFF7A1A)
+val AccentTeal = Color(0xFFFFB45C)
+val Bg = Color(0xFF100D0A)
+val SurfaceDark = Color(0xFF1B1713)
+val SurfaceHigher = Color(0xFF29221B)
+val TextDim = Color(0xFFB8AA9B)
 
 private val DarkColors = darkColorScheme(
     primary = Accent,
@@ -28,7 +28,7 @@ private val DarkColors = darkColorScheme(
 )
 
 @Composable
-fun RezkaTheme(content: @Composable () -> Unit) {
+fun FoxrezkaTheme(content: @Composable () -> Unit) {
     // always dark: it is a cinema app
     @Suppress("UNUSED_EXPRESSION")
     isSystemInDarkTheme()

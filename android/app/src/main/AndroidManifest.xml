@@ -5,7 +5,9 @@
 
     <application
         android:allowBackup="true"
-        android:label="Rezka"
+        android:icon="@mipmap/ic_launcher"
+        android:label="FOXrezka"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:theme="@style/Theme.Rezka">

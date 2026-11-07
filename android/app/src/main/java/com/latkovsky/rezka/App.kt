@@ -1,6 +1,8 @@
 package com.latkovsky.rezka
 
 import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,6 +23,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -34,6 +38,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -47,6 +54,8 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -92,6 +101,8 @@ object Core {
 }
 
 private const val PREFS = "rezka"
+private const val RECENT_KEY = "recently_watched"
+private const val HOME_CACHE_KEY = "homepage_series"
 
 private sealed interface Screen {
     data object Home : Screen
@@ -109,6 +120,93 @@ data class PlayerArgs(
     val startMs: Long,
     val resumeKey: String,
 )
+
+private data class WatchedItem(
+    val path: String,
+    val title: String,
+    val poster: String,
+    val subtitle: String,
+    val watchedAt: Long,
+)
+
+private fun loadRecent(prefs: android.content.SharedPreferences): List<WatchedItem> =
+    runCatching {
+        val items = JSONArray(prefs.getString(RECENT_KEY, "[]"))
+        buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val path = item.optString("path")
+                if (path.isNotBlank()) {
+                    add(
+                        WatchedItem(
+                            path = path,
+                            title = item.optString("title"),
+                            poster = item.optString("poster"),
+                            subtitle = item.optString("subtitle"),
+                            watchedAt = item.optLong("watchedAt"),
+                        ),
+                    )
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+private fun saveRecent(prefs: android.content.SharedPreferences, items: List<WatchedItem>) {
+    val json = JSONArray()
+    items.forEach { item ->
+        json.put(
+            JSONObject()
+                .put("path", item.path)
+                .put("title", item.title)
+                .put("poster", item.poster)
+                .put("subtitle", item.subtitle)
+                .put("watchedAt", item.watchedAt),
+        )
+    }
+    prefs.edit().putString(RECENT_KEY, json.toString()).apply()
+}
+
+private fun loadCachedHomepage(prefs: android.content.SharedPreferences): List<Card> =
+    runCatching {
+        val items = JSONArray(prefs.getString(HOME_CACHE_KEY, "[]"))
+        buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val path = item.optString("path")
+                if (path.isNotBlank()) {
+                    add(
+                        Card(
+                            id = item.optString("id"),
+                            title = item.optString("title"),
+                            path = path,
+                            poster = item.optString("poster"),
+                            info = item.optString("info"),
+                            kind = item.optString("kind", "series"),
+                        ),
+                    )
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+private fun saveCachedHomepage(
+    prefs: android.content.SharedPreferences,
+    cards: List<Card>,
+) {
+    val json = JSONArray()
+    cards.forEach { card ->
+        json.put(
+            JSONObject()
+                .put("id", card.id)
+                .put("title", card.title)
+                .put("path", card.path)
+                .put("poster", card.poster)
+                .put("info", card.info)
+                .put("kind", card.kind),
+        )
+    }
+    prefs.edit().putString(HOME_CACHE_KEY, json.toString()).apply()
+}
 
 private fun resumeKey(path: String, translator: String, season: String, episode: String) =
     "pos:$path|$translator|$season|$episode"
@@ -129,6 +227,9 @@ fun App() {
     var booting by remember { mutableStateOf(true) }
     var loggedIn by remember { mutableStateOf(false) }
     var email by remember { mutableStateOf("") }
+    var recent by remember { mutableStateOf(loadRecent(prefs)) }
+    var cachedHome by remember { mutableStateOf(loadCachedHomepage(prefs)) }
+    var selectedDestination by rememberSaveable { mutableIntStateOf(0) }
     var screen by remember { mutableStateOf<Screen>(Screen.Home) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -199,6 +300,18 @@ fun App() {
                     }
                     val key = resumeKey(detail.path, translatorId, seasonId, episodeId)
                     val subtitle = buildSubtitle(detail, translatorId, seasonId, episodeId)
+                    recent = (
+                        listOf(
+                            WatchedItem(
+                                path = detail.path,
+                                title = detail.title,
+                                poster = detail.poster,
+                                subtitle = subtitle,
+                                watchedAt = System.currentTimeMillis(),
+                            ),
+                        ) + recent.filterNot { it.path == detail.path }
+                    ).take(30)
+                    saveRecent(prefs, recent)
                     screen = Screen.Play(
                         PlayerArgs(
                             detail = detail,
@@ -248,6 +361,12 @@ fun App() {
                 else -> when (val current = screen) {
                     is Screen.Home -> HomeScreen(
                         email = email,
+                        recent = recent,
+                        cachedHome = cachedHome,
+                        onHomeCardsUpdated = { cachedHome = it },
+                        prefs = prefs,
+                        selectedDestination = selectedDestination,
+                        onDestinationSelected = { selectedDestination = it },
                         onLogout = {
                             Core.client.logout()
                             prefs.edit().remove("cookies").apply()
@@ -268,9 +387,8 @@ fun App() {
 
                     is Screen.Play -> {
                         val args = current.args
-                        val best = args.streams.qualities.first()
                         PlayerScreen(
-                            url = best.url,
+                            qualities = args.streams.qualities,
                             title = args.detail.title,
                             subtitle = args.subtitle,
                             startPositionMs = args.startMs,
@@ -336,7 +454,7 @@ private fun SplashScreen() {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                "rezka",
+                "FOXrezka",
                 fontSize = 42.sp,
                 fontWeight = FontWeight.Black,
                 color = Accent,
@@ -368,8 +486,8 @@ private fun LoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            "rezka",
-            fontSize = 46.sp,
+            "FOXrezka",
+            fontSize = 42.sp,
             fontWeight = FontWeight.Black,
             color = Accent,
         )
@@ -452,143 +570,357 @@ private fun LoginScreen(
 @Composable
 private fun HomeScreen(
     email: String,
+    recent: List<WatchedItem>,
+    cachedHome: List<Card>,
+    onHomeCardsUpdated: (List<Card>) -> Unit,
+    prefs: android.content.SharedPreferences,
+    selectedDestination: Int,
+    onDestinationSelected: (Int) -> Unit,
     onLogout: () -> Unit,
     onOpen: (String) -> Unit,
 ) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var category by rememberSaveable { mutableIntStateOf(0) }
     var query by rememberSaveable { mutableStateOf("") }
-    var cards by remember { mutableStateOf<List<Card>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var refreshTick by remember { mutableIntStateOf(0) }
+    var homeCards by remember { mutableStateOf(cachedHome) }
+    var catalogCards by remember { mutableStateOf<List<Card>>(emptyList()) }
+    var homeLoading by remember { mutableStateOf(cachedHome.isEmpty()) }
+    var catalogLoading by remember { mutableStateOf(false) }
+    var homeError by remember { mutableStateOf<String?>(null) }
+    var catalogError by remember { mutableStateOf<String?>(null) }
+    var homeRefresh by remember { mutableIntStateOf(0) }
+    var catalogRefresh by remember { mutableIntStateOf(0) }
 
     val kinds = listOf("films", "series", "cartoons")
-    val titles = listOf("Фильмы", "Сериалы", "Мультики")
+    val categoryTitles = listOf("Фильмы", "Сериалы", "Мультики")
+    val destinationTitles = listOf("Главная", "Каталог", "Профиль")
 
-    LaunchedEffect(tab, query, refreshTick) {
+    LaunchedEffect(homeRefresh) {
+        if (homeCards.isEmpty()) homeLoading = true
+        homeError = null
+        val result = withContext(Dispatchers.IO) {
+            runCatching { Core.client.homepage() }
+        }
+        result
+            .onSuccess {
+                homeCards = it
+                onHomeCardsUpdated(homeCards)
+                saveCachedHomepage(prefs, homeCards)
+            }
+            .onFailure {
+                homeError = it.userMessage()
+                homeCards = emptyList()
+            }
+        homeLoading = false
+    }
+
+    LaunchedEffect(selectedDestination, category, query, catalogRefresh) {
+        if (selectedDestination != 1) return@LaunchedEffect
         if (query.isNotBlank()) delay(500)
-        loading = true
-        error = null
+        catalogLoading = true
+        catalogError = null
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                if (query.isBlank()) Core.client.category(kinds[tab])
+                if (query.isBlank()) Core.client.category(kinds[category])
                 else Core.client.search(query)
             }
         }
         result
-            .onSuccess { cards = it }
+            .onSuccess { catalogCards = it }
             .onFailure {
-                error = it.userMessage()
-                cards = emptyList()
+                catalogError = it.userMessage()
+                catalogCards = emptyList()
             }
-        loading = false
+        catalogLoading = false
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                .padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "rezka",
-                fontSize = 30.sp,
+                "FOXrezka",
+                fontSize = 26.sp,
                 fontWeight = FontWeight.Black,
                 color = Accent,
             )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                email,
-                color = TextDim,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onLogout) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Logout,
-                    contentDescription = "Выйти",
-                    tint = TextDim,
-                )
-            }
+            Spacer(Modifier.weight(1f))
+            Text(destinationTitles[selectedDestination], color = TextDim, style = MaterialTheme.typography.labelLarge)
         }
 
-        TabRow(
-            selectedTabIndex = tab,
-            containerColor = Color.Transparent,
-            contentColor = Accent,
-        ) {
-            titles.forEachIndexed { index, title ->
-                Tab(
-                    selected = tab == index,
-                    onClick = { tab = index },
-                    text = {
-                        Text(
-                            title,
-                            fontWeight = if (tab == index) FontWeight.SemiBold else FontWeight.Normal,
-                        )
-                    },
+        when (selectedDestination) {
+            0 -> {
+                Text(
+                    "Сериалы, которые сейчас смотрят",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 18.dp, top = 12.dp, bottom = 4.dp),
                 )
-            }
-        }
-
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            placeholder = { Text("Поиск фильмов и сериалов") },
-            singleLine = true,
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            trailingIcon = {
-                if (query.isNotEmpty()) {
-                    IconButton(onClick = { query = "" }) {
-                        Icon(Icons.Default.Close, contentDescription = "Очистить")
-                    }
-                }
-            },
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        )
-
-        Box(Modifier.fillMaxSize()) {
-            when {
-                loading -> CircularProgressIndicator(
-                    color = Accent,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-
-                error != null -> Column(
-                    Modifier.align(Alignment.Center).padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(error ?: "", color = TextDim)
-                    Spacer(Modifier.height(12.dp))
-                    Button(onClick = { refreshTick++ }) {
-                        Icon(Icons.Default.Refresh, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Повторить")
-                    }
-                }
-
-                cards.isEmpty() -> Text(
-                    if (query.isBlank()) "Пусто" else "Ничего не найдено",
+                Text(
+                    "Подборка с главной страницы Rezka",
                     color = TextDim,
-                    modifier = Modifier.align(Alignment.Center),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
                 )
-
-                else -> LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 108.dp),
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    items(cards, key = { it.path }) { card ->
-                        PosterCard(card = card, onClick = { onOpen(card.path) })
+                if (homeError != null && homeCards.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Не удалось обновить подборку. Показаны сохранённые данные.",
+                            color = TextDim,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { homeRefresh++ }) { Text("Повторить") }
                     }
                 }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    when {
+                        homeLoading -> CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+
+                        homeError != null -> Column(
+                            Modifier.align(Alignment.Center).padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(homeError.orEmpty(), color = TextDim)
+                            TextButton(onClick = { homeRefresh++ }) { Text("Повторить") }
+                        }
+
+                        homeCards.isEmpty() -> Text(
+                            "На главной Rezka пока нет сериалов для показа",
+                            color = TextDim,
+                            modifier = Modifier.align(Alignment.Center).padding(24.dp),
+                        )
+
+                        else -> LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 108.dp),
+                            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            items(homeCards, key = { it.path }) { card ->
+                                PosterCard(card = card, onClick = { onOpen(card.path) })
+                            }
+                        }
+                    }
+                }
+            }
+
+            1 -> {
+                TabRow(
+                    selectedTabIndex = category,
+                    containerColor = Color.Transparent,
+                    contentColor = Accent,
+                ) {
+                    categoryTitles.forEachIndexed { index, title ->
+                        Tab(
+                            selected = category == index,
+                            onClick = { category = index },
+                            text = {
+                                Text(
+                                    title,
+                                    fontWeight = if (category == index) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                            },
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Поиск фильмов и сериалов") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Очистить")
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    when {
+                        catalogLoading -> CircularProgressIndicator(
+                            color = Accent,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+
+                        catalogError != null -> Column(
+                            Modifier.align(Alignment.Center).padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(catalogError.orEmpty(), color = TextDim)
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = { catalogRefresh++ }) {
+                                Icon(Icons.Default.Refresh, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Повторить")
+                            }
+                        }
+
+                        catalogCards.isEmpty() -> Text(
+                            if (query.isBlank()) "Пока ничего нет" else "Ничего не найдено",
+                            color = TextDim,
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+
+                        else -> LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 108.dp),
+                            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            items(catalogCards, key = { it.path }) { card ->
+                                PosterCard(card = card, onClick = { onOpen(card.path) })
+                            }
+                        }
+                    }
+                }
+            }
+
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item(key = "profile") {
+                        Surface(
+                            color = SurfaceDark,
+                            shape = RoundedCornerShape(24.dp),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        ) {
+                            Column(Modifier.padding(20.dp)) {
+                                Text(
+                                    email.take(1).uppercase(),
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 24.sp,
+                                    modifier = Modifier
+                                        .background(Accent, RoundedCornerShape(18.dp))
+                                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                                )
+                                Spacer(Modifier.height(14.dp))
+                                Text(email, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                Text("Ваш профиль FOXrezka", color = TextDim, style = MaterialTheme.typography.bodySmall)
+                                Spacer(Modifier.height(14.dp))
+                                TextButton(onClick = onLogout) {
+                                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Выйти из аккаунта")
+                                }
+                            }
+                        }
+                    }
+
+                    item(key = "recent-title") {
+                        Text(
+                            "Смотрели недавно",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 14.dp),
+                        )
+                    }
+                    if (recent.isEmpty()) {
+                        item(key = "recent-empty") {
+                            Surface(
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(18.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Здесь появятся фильмы и серии, которые вы запустите в FOXrezka.",
+                                    color = TextDim,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(18.dp),
+                                )
+                            }
+                        }
+                    } else {
+                        items(recent, key = { it.path }) { watched ->
+                            Surface(
+                                onClick = { onOpen(watched.path) },
+                                color = SurfaceDark,
+                                shape = RoundedCornerShape(18.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AsyncImage(
+                                        model = watched.poster,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(width = 58.dp, height = 82.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(SurfaceHigher),
+                                    )
+                                    Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                                        Text(
+                                            watched.title,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (watched.subtitle.isNotBlank()) {
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(
+                                                watched.subtitle,
+                                                color = TextDim,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            java.text.DateFormat.getDateTimeInstance(
+                                                java.text.DateFormat.MEDIUM,
+                                                java.text.DateFormat.SHORT,
+                                            ).format(java.util.Date(watched.watchedAt)),
+                                            color = TextDim,
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                    Icon(Icons.Default.PlayArrow, contentDescription = "Открыть", tint = Accent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        NavigationBar(containerColor = SurfaceDark) {
+            val icons = listOf(Icons.Default.Home, Icons.Default.Movie, Icons.Default.Person)
+            destinationTitles.forEachIndexed { index, title ->
+                NavigationBarItem(
+                    selected = selectedDestination == index,
+                    onClick = { onDestinationSelected(index) },
+                    icon = { Icon(icons[index], contentDescription = null) },
+                    label = { Text(title) },
+                    colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                        selectedIconColor = Accent,
+                        selectedTextColor = Accent,
+                        indicatorColor = SurfaceHigher,
+                    ),
+                )
             }
         }
     }
@@ -777,19 +1109,41 @@ private fun DetailScreen(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(8.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        detail.translators.forEach { t ->
-                            FilterChip(
-                                selected = translator == t.id,
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(detail.translators, key = { it.id }) { t ->
+                            val selected = translator == t.id
+                            Surface(
                                 onClick = { translator = t.id },
-                                label = {
+                                color = if (selected) Accent.copy(alpha = 0.16f) else SurfaceDark,
+                                shape = RoundedCornerShape(16.dp),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    width = 1.dp,
+                                    color = if (selected) Accent else SurfaceHigher,
+                                ),
+                            ) {
+                                Column(
+                                    Modifier
+                                        .widthIn(min = 132.dp, max = 210.dp)
+                                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                                ) {
                                     Text(
-                                        if (t.premium) "${t.name} · Premium" else t.name,
+                                        t.name,
+                                        color = if (selected) Accent else MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
-                                },
-                            )
+                                    Text(
+                                        when {
+                                            t.premium -> "Premium"
+                                            selected -> "Выбрана"
+                                            else -> "Озвучка"
+                                        },
+                                        color = if (selected) Accent else TextDim,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            }
                         }
                     }
                 }

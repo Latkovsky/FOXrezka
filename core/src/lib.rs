@@ -110,7 +110,10 @@ impl Client {
     }
 
     pub fn homepage(&self) -> Result<Vec<Card>, CoreError> {
-        self.load_cards(&format!("{}/", http::BASE))
+        let url = format!("{}/", http::BASE);
+        let html = self.http.get_html(&url)?;
+        guard_login(&html)?;
+        Ok(catalog::parse_homepage_series(&html, 12))
     }
 
     pub fn category(&self, kind: String) -> Result<Vec<Card>, CoreError> {
